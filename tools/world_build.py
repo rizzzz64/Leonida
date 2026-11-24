@@ -683,7 +683,7 @@ def _build_instanced_world(entries, ttpf_index, *, placements, lod_levels, regio
                 m["chunks"] = sum(1 for c in chunks if c["lod"] == name)
                 m["placements"] = sum(c["models"] for c in chunks if c["lod"] == name)
         world_doc = {
-            "spawn": _compute_spawn([c for c in chunks if c.get("lod", "hd") in ("hd", "orphan_hd")] or chunks),
+            "spawn": _compute_spawn(chunks, bands),
             "chunk_size": float(chunk_size),
             "layout": "placements",
             "instancing": mode,
@@ -1159,9 +1159,19 @@ def _apply_grid_layout(models: list[dict], glb_mod) -> None:
             cur_x += sx + GRID_GAP
 
 
-def _compute_spawn(chunks: list[dict]) -> list[float]:
+def _compute_spawn(chunks: list[dict], bands: dict | None = None) -> list[float]:
     if not chunks:
         return [0.0, 20.0, 40.0]
+
+    lod_spawn = False
+    if bands is not None:
+        # Only tiers whose band includes distance zero can load directly below the camera.
+        eligible = [c for c in chunks if c.get("lod") in bands and
+                    bands[c["lod"]][0] == 0 and bands[c["lod"]][1] > 0]
+        if eligible:
+            chunks = ([c for c in eligible if c["lod"] == "hd"] or
+                      [c for c in eligible if c["lod"] == "orphan_hd"] or eligible)
+            lod_spawn = True
 
     centers = [
         (0.5 * (c["bounds"][0] + c["bounds"][3]), 0.5 * (c["bounds"][2] + c["bounds"][5]))
@@ -1182,9 +1192,16 @@ def _compute_spawn(chunks: list[dict]) -> list[float]:
     cx = 0.5 * (b[0] + b[3])
     max_y = b[4]
     max_z = b[5]
-    # The viewer loads chunks within 1400 m. Limiting the offsets to 300 m up and 720 m back
-    # keeps the camera within 780 m of the chosen chunk's bounds, even for very large models.
+    # The ordinary viewer loads chunks within 1400 m. LOD worlds use horizontal distance
+    # from the cell instead, and their HD bands can be much shorter than the old back offset.
     span = min(max(b[3] - b[0], b[4] - b[1], b[5] - b[2]), SPAWN_SPAN_CAP)
+    if lod_spawn:
+        cell = chunks[best_idx]["cell"]
+        cx = 0.5 * (cell[0] + cell[2])
+        cz = 0.5 * (cell[1] + cell[3])
+        return [float(cx), float(max_y + max(8.0, 0.25 * span)), float(cz)]
+    # Limiting the ordinary offsets to 300 m up and 720 m back keeps the camera
+    # within 780 m of the chosen chunk's bounds, even for very large models.
     return [
         float(cx),
         float(max_y + max(8.0, 0.25 * span)),
