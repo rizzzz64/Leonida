@@ -382,8 +382,8 @@ public:
 
     VkResult submit(const ResourceBinding* binding, ResourceId source, bool vsync, const PresentRect* source_rect,
                     bool srgb, bool tear = false, const PresentPlanes* planes = nullptr) {
-        wait_for_room();
-        std::lock_guard lock(present_mutex_);
+        std::unique_lock lock(present_mutex_);
+        if (!wait_for_room(lock)) return VK_NOT_READY;
         // `binding` null and `planes` null: clear instead of blit; `planes`: compose them (`binding`, `source`,
         // `source_rect` unused). Only a present that reads a texture waits for held work.
         if (deferred_.empty() && !((binding || planes) && context_.holds().any_held()))
@@ -408,22 +408,23 @@ private:
         return abort && abort();
     }
 
-    // Called without present_mutex_: the thread that releases the queued presents needs it.
-    void wait_for_room() {
+    // Return with the admission lock held on success. A separate check followed by
+    // locking in submit() allows concurrent producers to overrun the queue limit.
+    // Unlock while waiting or calling the user abort callback so deferred work can drain.
+    bool wait_for_room(std::unique_lock<std::recursive_mutex>& lock) {
         bool logged = false;
-        for (;;) {
-            {
-                std::lock_guard lock(present_mutex_);
-                if (deferred_.size() < max_deferred_presents) return;
-            }
+        while (deferred_.size() >= max_deferred_presents) {
+            lock.unlock();
             if (!logged) {
                 logged = true;
                 std::fprintf(stderr, "[rt] d3d12: %zu Presents are queued behind held work; this one waits for it\n",
                              max_deferred_presents);
             }
-            if (should_abort()) return;
+            if (should_abort()) return false;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            lock.lock();
         }
+        return true;
     }
 
     struct PendingPresent {

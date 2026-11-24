@@ -415,10 +415,16 @@ int main() {
                 EXPECT(doomed.ok());
                 doomed.wait(never.semaphore(), 1);
                 EXPECT(doomed.execute({&ptr, 1}) == ReplayResult::success);   // held for good
-                EXPECT(presenter.present(1, true) == VK_SUCCESS);             // queued behind it
+                for (std::size_t i = 0; i < VulkanPresenter::max_deferred_presents; ++i)
+                    EXPECT(presenter.present(1, true) == VK_SUCCESS);
                 EXPECT(presenter.presented() == shown);
+                // Full queue: a cancelled wait must not enqueue another frame.
+                presenter.set_abort([] { return true; });
+                const auto refused = presenter.present_blank(true);
+                presenter.set_abort({});
+                EXPECT(refused == VK_NOT_READY);
             }
-            EXPECT(presenter.presented() == shown + 1);
+            EXPECT(presenter.presented() == shown + VulkanPresenter::max_deferred_presents);
             std::printf("presenter sync: Present queued behind a destroyed queue's held work ran\n");
         }
 
