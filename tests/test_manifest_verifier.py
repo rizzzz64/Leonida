@@ -963,6 +963,12 @@ class TestVerifyCache(unittest.TestCase):
             f.write(deep)
         with self.assertRaises(mv.ManifestError):
             mv.load_manifest(self.manifest)
+        # The decoder's recursion threshold differs by Python version; force the
+        # exception as well so this exercises the handler on every CI interpreter.
+        with patch.object(mv.json, "load", side_effect=RecursionError("synthetic decoder limit")):
+            self.assertEqual(mv.load_cache(self.cache), {})
+            with self.assertRaises(mv.ManifestError):
+                mv.load_manifest(self.manifest)
 
     def test_overlapping_cache_publications_use_distinct_staging_files(self) -> None:
         sentinel = self.cache + ".tmp"
