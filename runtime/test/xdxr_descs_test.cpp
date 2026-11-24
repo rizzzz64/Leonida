@@ -69,6 +69,13 @@ int stream_lookup() {
     records[1].type = 0;
     CHECK(find_stream_record(stream_of(records, 1), 0) == nullptr);
     CHECK(find_stream_record(stream_of(records, 2), 0) == &records[1]);
+    for (size_t tail = 1; tail < sizeof(StreamRecord); ++tail) {
+        CHECK(find_stream_record(StreamDesc{tail, records}, 1) == nullptr);
+        CHECK(find_stream_record(StreamDesc{sizeof(StreamRecord) + tail, records}, 0) == nullptr);
+        CHECK(find_stream_record(StreamDesc{sizeof(StreamRecord) + tail, records}, 1) == &records[0]);
+    }
+    alignas(StreamRecord) unsigned char unaligned[sizeof(StreamRecord) + 1]{};
+    CHECK(find_stream_record(StreamDesc{sizeof(StreamRecord), unaligned + 1}, 0) == nullptr);
     return 0;
 }
 
