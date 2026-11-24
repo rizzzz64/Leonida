@@ -30,6 +30,18 @@ int main() {
     queue_one_destroyed = true;
     if (tickets.completed(query) != 4 || queried_destroyed) return 4;
 
+    // A retirement wait needs one entry per timeline, not one per submission.
+    leonida::RetireTickets<int> batch;
+    for (std::uint64_t i = 1; i <= 10000; ++i)
+        batch.record(i, int(i % 2 + 1), i);
+    const auto waits = batch.pending_through(9000);
+    if (waits.size() != 2 || waits[0] != std::pair<int, std::uint64_t>{2, 8999} ||
+        waits[1] != std::pair<int, std::uint64_t>{1, 9000}) return 5;
+    batch.queue_idle(2);
+    const auto remaining = batch.pending_through(9000);
+    if (remaining.size() != 1 || remaining[0] != std::pair<int, std::uint64_t>{1, 9000}) return 6;
+    if (!batch.pending_through(0).empty()) return 7;
+    if (batch.completed([](int, std::uint64_t) { return false; }) != 1) return 8;
     std::puts("out-of-order queue completion kept the retirement prefix safe");
     return 0;
 }

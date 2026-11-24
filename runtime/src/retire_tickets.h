@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <deque>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace leonida {
@@ -34,8 +35,16 @@ public:
     // that must have them done (and may not hold the lock that guards this object while it waits) waits for.
     std::vector<std::pair<Semaphore, std::uint64_t>> pending_through(std::uint64_t ticket) const {
         std::vector<std::pair<Semaphore, std::uint64_t>> out;
-        for (const Entry& entry : pending_)
-            if (entry.ticket <= ticket && !entry.idle) out.emplace_back(entry.semaphore, entry.value);
+        std::unordered_map<Semaphore, std::size_t> index;
+        // Waiting for the highest value on a timeline also waits for its earlier submissions.
+        // Preserve first-seen order and omit idle entries (their semaphore may be destroyed).
+        for (const Entry& entry : pending_) {
+            if (entry.ticket > ticket) break;
+            if (entry.idle) continue;
+            auto [it, inserted] = index.try_emplace(entry.semaphore, out.size());
+            if (inserted) out.emplace_back(entry.semaphore, entry.value);
+            else if (out[it->second].second < entry.value) out[it->second].second = entry.value;
+        }
         return out;
     }
 
