@@ -127,54 +127,42 @@ void fixed_cases() {
 }
 
 void allocation_failures() {
-    for (bool replace : {false, true}) {
-        for (std::uint64_t size : {0x40u, 0x100u, 0x400u}) {
-            // New entries allocate a range and a size node; replacement only needs a size node.
-            for (int fail_after = 0; fail_after < (replace ? 1 : 2); ++fail_after) {
-                Index index;
-                index.insert(0x1000, 0x100, 1);
-                index.insert(0x2000, 0x100, 2);  // equal sizes must retain separate multiset entries
-                const std::uint64_t va = replace ? 0x1000 : 0x3000;
-                const std::uintptr_t id = replace ? 1 : 3;
-                bool threw = false;
-                allocations_before_failure = fail_after;
-                try {
-                    index.insert(va, size, id);
-                } catch (const std::bad_alloc&) {
-                    threw = true;
-                }
-                allocations_before_failure = -1;
-                check(threw, "injected insert allocation failure reached");
-                Index::Hit first{}, second{};
-                const bool unchanged = index.size() == 2 && index.longest() == 0x100 &&
-                    index.find(0x1000, first) && first.id == 1 && first.size == 0x100 &&
-                    index.find(0x2000, second) && second.id == 2 && second.size == 0x100 &&
-                    at(index, 0x10ff) == 1 && at(index, 0x1100) == 0 && at(index, 0x3000) == 0;
-                check(unchanged, "failed insert preserves ranges and lookup bound");
-                if (!unchanged) continue;  // do not erase an inconsistent index in the negative control
-
-                if (replace && size == 0x100) {
-                    // A failed same-size replacement can look unchanged while silently dropping a size node.
-                    index.erase(0x2000, 2);
-                    const bool counted = index.size() == 1 && index.longest() == 0x100;
-                    check(counted, "failed same-size replacement retains both size entries");
-                    if (!counted) continue;
-                    index.insert(0x2000, 0x100, 2);
-                }
-
-                index.insert(va, size, id);
-                Index::Hit retried{};
-                check(index.size() == (replace ? 2u : 3u) && index.find(va, retried) &&
-                      retried.id == id && retried.size == size, "insert succeeds after allocation failure");
-                check(index.longest() == (size > 0x100 ? size : 0x100), "retry updates the lookup bound");
-                index.erase(va, id);
-                check(index.longest() == 0x100 && at(index, 0x20ff) == 2,
-                      "erasing retried range keeps the other size entry");
-                index.erase(0x1000, 1);
-                index.erase(0x2000, 2);
-                check(index.size() == 0 && index.longest() == 0, "all size entries disappear after erase");
-            }
+    for (std::uint64_t size : {0x40u, 0x100u, 0x400u}) {
+        Index index;
+        index.insert(0x1000, 0x100, 1);
+        index.insert(0x2000, 0x100, 2);
+        bool threw = false;
+        allocations_before_failure = 0;
+        try {
+            index.insert(0x3000, size, 3);
+        } catch (const std::bad_alloc&) {
+            threw = true;
         }
+        allocations_before_failure = -1;
+        check(threw, "new node allocation failure reached");
+        check(index.size() == 2 && index.longest() == 0x100 && at(index, 0x10ff) == 1 &&
+              at(index, 0x20ff) == 2 && at(index, 0x3000) == 0, "failed insert leaves tree unchanged");
+        index.insert(0x3000, size, 3);
+        check(at(index, 0x3000 + size - 1) == 3, "insert succeeds after allocation failure");
+        index.erase(0x3000, 3);
+
+        // Updating a node needs no allocation, even when its endpoint or subtree maximum changes.
+        threw = false;
+        allocations_before_failure = 0;
+        try {
+            index.insert(0x1000, size, 1);
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        allocations_before_failure = -1;
+        Index::Hit hit{};
+        check(!threw && index.size() == 2 && index.find(0x1000, hit) && hit.size == size,
+              "replacement is allocation-free and updates the range");
+        check(index.longest() == (size > 0x100 ? size : 0x100), "replacement updates the bound");
+        index.erase(0x1000, 1);
+        check(index.longest() == 0x100 && at(index, 0x20ff) == 2, "erase preserves remaining range");
+        index.erase(0x2000, 2);
+        check(index.size() == 0 && index.longest() == 0, "empty tree has no bound");
     }
 }
 
@@ -319,12 +307,71 @@ void time_miss_after_free() {
                 (unsigned long long)count, ns[0], ns[1], sink ? " (hit?)" : "");
 }
 
+// Exercise rotations, replacements, overlapping endpoints, and 64-bit address overflow during churn.
+void mixed_updates() {
+    Index index;
+    std::vector<Range> ranges;
+    std::mt19937_64 rng(20261124);
+    constexpr std::uint64_t top = ~std::uint64_t(0);
+    for (int i = 0; i < 10000; ++i) {
+        const std::uint64_t va = (i % 3 == 0 ? top - 512 : 1) + rng() % 512;
+        const std::uintptr_t id = 1 + rng() % 8;
+        const std::uint64_t size = i % 11 == 0 ? top - rng() % 512 : rng() % 1024;
+        auto it = std::find_if(ranges.begin(), ranges.end(), [&](const Range& r) {
+            return r.start == va && r.id == id;
+        });
+        if (i % 3 == 0) {
+            index.erase(va, id);
+            if (it != ranges.end()) ranges.erase(it);
+        } else {
+            index.insert(va, size, id);
+            if (size) {
+                if (it == ranges.end()) ranges.push_back({va, size, id});
+                else it->size = size;
+            }
+        }
+        std::uint64_t longest = 0;
+        for (const Range& r : ranges) longest = std::max(longest, r.size);
+        check(index.size() == ranges.size() && index.longest() == longest, "churn updates subtree metadata");
+        for (int j = 0; j < 5; ++j) {
+            const std::uint64_t addr = j % 2 ? top - rng() % 1024 : rng() % 1024;
+            const std::uint64_t bytes = j == 0 ? 0 : j == 1 ? top - rng() % 1024 : 1 + rng() % 2048;
+            check(at(index, addr, bytes) == scan(ranges, addr, bytes ? bytes : 1), "churn agrees with scan");
+        }
+        if (failures) return;
+    }
+    Index copied = index;
+    Index assigned;
+    assigned = copied;
+    Index moved = std::move(assigned);
+    check(moved.size() == index.size() && moved.longest() == index.longest() &&
+          at(moved, top, top) == at(index, top, top), "copy and move preserve metadata and lookup");
+}
+
+// A live 1 GiB alias and many short ranges: the global-length walk used to visit all short ranges.
+void time_live_alias() {
+    Index index;
+    constexpr std::uint64_t count = 40000, stride = 256;
+    for (std::uint64_t i = 0; i < count; ++i) index.insert(4096 + i * stride, 64, i + 1);
+    index.insert(1, std::uint64_t(1) << 30, count + 1);
+    constexpr int lookups = 5000;
+    const auto start = std::chrono::steady_clock::now();
+    std::uint64_t sum = 0;
+    for (int i = 0; i < lookups; ++i)
+        sum += at(index, 4096 + (count - 1) * stride + 128 + i % 64, 128);
+    const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / lookups;
+    check(sum == (count + 1) * lookups, "live large alias resolves through short ranges");
+    std::printf("live large alias over %llu short ranges: %.1f ns/lookup\n", (unsigned long long)count, ns);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     fixed_cases();
     allocation_failures();
     random_tables();
+    mixed_updates();
+    time_live_alias();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

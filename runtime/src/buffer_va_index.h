@@ -1,24 +1,18 @@
 #pragma once
 
 // Which registered buffer a console VA falls in (VulkanContext::buffer_at, for vertex and index views and
-// WriteBufferImmediate). Ranges are kept ordered by their first VA, so a lookup is a binary search instead of a scan of
-// every registered resource. No Vulkan or Windows dependency; not thread-safe (VulkanContext guards it with
-// resource_mutex_, like the bindings themselves).
-//
-// D3D12 lets placed buffers alias, so ranges may overlap. A lookup names the bytes it needs, [va, va + bytes), and
-// returns, among the ranges that hold va, the one that starts closest below it (the larger ID on a tie) that also
-// holds all of those bytes; when none does, the closest one that holds va. So a view that starts in a small placed
-// buffer and runs past its end resolves to a larger buffer that aliases the same memory and holds all of it, instead
-// of being cut at the small one's end (found in review of #2823). The walk goes down from the nearest start and stops
-// once no range can still reach the VA, or, with a fallback found, once no range can still hold all the bytes; both
-// are bounded by `longest_`. Without overlaps the first range it looks at is the answer, or none is.
-// `longest_` is the longest range indexed now, not the longest ever: a large buffer that is freed stops lengthening
-// later misses. A miss still walks every start within the longest live range below the VA.
+// WriteBufferImmediate). No Vulkan or Windows dependency; the caller guards this index with resource_mutex_.
+// D3D12 placed buffers can alias. Prefer the greatest (start, id) containing the whole requested span,
+// or the greatest (start, id) containing its first byte if none fits. A zero byte request counts as one.
+// An AVL tree caches each subtree's greatest inclusive endpoint: unlike a global longest-range bound,
+// one large live buffer cannot force a walk over thousands of unrelated short buffers. Lookup and updates
+// are O(log n), including overlapping ranges. Endpoints use 65 bits to preserve the old subtraction-based
+// containment rule even for ranges whose mathematical end exceeds UINT64_MAX.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <map>
-#include <set>
+#include <memory>
 #include <utility>
 
 namespace leonida {
@@ -26,74 +20,157 @@ namespace leonida {
 template<typename Id>
 class BufferVaIndex {
 public:
-    // Registers [va, va + size). A null VA or an empty range is not indexed (no lookup can land in it).
+    BufferVaIndex() = default;
+    BufferVaIndex(const BufferVaIndex& other) : root_(clone(other.root_.get())) {}
+    BufferVaIndex& operator=(const BufferVaIndex& other) {
+        if (this != &other) root_ = clone(other.root_.get());
+        return *this;
+    }
+    BufferVaIndex(BufferVaIndex&&) noexcept = default;
+    BufferVaIndex& operator=(BufferVaIndex&&) noexcept = default;
+
     void insert(std::uint64_t va, std::uint64_t size, Id id) {
-        if (!va || !size) return;
-        const auto [it, added] = ranges_.try_emplace({va, id}, size);
-        try {
-            sizes_.insert(size);
-        } catch (...) {
-            if (added) ranges_.erase(it);
-            throw;
-        }
-        if (!added) {  // the same (va, id) again: its new size replaces the old one
-            drop_size(it->second);
-            it->second = size;
-        }
-        longest_ = *sizes_.rbegin();
+        if (va && size) insert_node(root_, {va, id}, size);
     }
 
-    // Forgets what insert(va, size, id) registered; nothing when it was not indexed.
-    void erase(std::uint64_t va, Id id) {
-        const auto it = ranges_.find({va, id});
-        if (it == ranges_.end()) return;
-        drop_size(it->second);
-        ranges_.erase(it);
-        longest_ = sizes_.empty() ? 0 : *sizes_.rbegin();
-    }
+    void erase(std::uint64_t va, Id id) { erase_node(root_, {va, id}); }
 
     struct Hit {
         Id id;
-        std::uint64_t start;  // the range's first VA
+        std::uint64_t start;
         std::uint64_t size;
     };
 
-    // The range that holds `va`, preferring one that holds [va, va + bytes) (bytes 0 counts as 1); false when none
-    // holds va.
     bool find(std::uint64_t va, Hit& out, std::uint64_t bytes = 1) const {
         if (!bytes) bytes = 1;
-        bool found = false;  // `out` holds the closest range that holds va, though not all the bytes
-        auto it = ranges_.upper_bound({va, max_id()});
-        while (it != ranges_.begin()) {
-            --it;
-            const std::uint64_t start = it->first.first;
-            const std::uint64_t offset = va - start;  // start <= va here; it only grows as the walk goes down
-            if (offset >= longest_) break;            // no range that starts this low reaches va
-            if (found && bytes > longest_ - offset) break;  // nor holds all the bytes
-            if (offset >= it->second) continue;
-            if (bytes <= it->second - offset) {
-                out = {it->first.second, start, it->second};
-                return true;
-            }
-            if (!found) {
-                out = {it->first.second, start, it->second};
-                found = true;
-            }
-        }
-        return found;
+        const Node* hit = search(root_.get(), va, endpoint(va, bytes));
+        if (!hit && bytes != 1) hit = search(root_.get(), va, endpoint(va, 1));
+        if (!hit) return false;
+        out = {hit->key.second, hit->key.first, hit->size};
+        return true;
     }
 
-    std::size_t size() const { return ranges_.size(); }
-    std::uint64_t longest() const { return longest_; }
+    std::size_t size() const { return root_ ? root_->count : 0; }
+    std::uint64_t longest() const { return root_ ? root_->longest : 0; }
 
 private:
-    static constexpr Id max_id() { return ~Id(0); }
+    using Key = std::pair<std::uint64_t, Id>;
+    using End = std::pair<bool, std::uint64_t>;
+    static End endpoint(std::uint64_t start, std::uint64_t size) {
+        const auto last = start + (size - 1);
+        return {last < start, last};
+    }
 
-    void drop_size(std::uint64_t size) { sizes_.erase(sizes_.find(size)); }  // one copy, not every range of that size
+    struct Node {
+        Node(Key k, std::uint64_t s) : key(k), size(s), last(endpoint(k.first, s)), longest(s) {}
+        Key key;
+        std::uint64_t size;
+        End last;
+        std::uint64_t longest;
+        std::size_t count = 1;
+        int height = 1;
+        std::unique_ptr<Node> left, right;
+    };
+    using Ptr = std::unique_ptr<Node>;
 
-    std::map<std::pair<std::uint64_t, Id>, std::uint64_t> ranges_;  // (first VA, id) -> bytes
-    std::multiset<std::uint64_t> sizes_;  // the size of every indexed range, so the longest is known after an erase
-    std::uint64_t longest_ = 0;  // the longest indexed range, 0 when none is
+    static int height(const Ptr& n) { return n ? n->height : 0; }
+    static int balance(const Ptr& n) { return height(n->left) - height(n->right); }
+
+    static void refresh(Node& n) {
+        n.last = endpoint(n.key.first, n.size);
+        n.longest = n.size;
+        n.count = 1;
+        n.height = 1 + std::max(height(n.left), height(n.right));
+        for (const Node* child : {n.left.get(), n.right.get()}) {
+            if (!child) continue;
+            n.last = std::max(n.last, child->last);
+            n.longest = std::max(n.longest, child->longest);
+            n.count += child->count;
+        }
+    }
+
+    static void rotate_left(Ptr& n) {
+        Ptr pivot = std::move(n->right);
+        n->right = std::move(pivot->left);
+        refresh(*n);
+        pivot->left = std::move(n);
+        refresh(*pivot);
+        n = std::move(pivot);
+    }
+
+    static void rotate_right(Ptr& n) {
+        Ptr pivot = std::move(n->left);
+        n->left = std::move(pivot->right);
+        refresh(*n);
+        pivot->right = std::move(n);
+        refresh(*pivot);
+        n = std::move(pivot);
+    }
+
+    static void rebalance(Ptr& n) {
+        if (!n) return;
+        refresh(*n);
+        if (balance(n) > 1) {
+            if (balance(n->left) < 0) rotate_left(n->left);
+            rotate_right(n);
+        } else if (balance(n) < -1) {
+            if (balance(n->right) > 0) rotate_right(n->right);
+            rotate_left(n);
+        }
+    }
+
+    static void insert_node(Ptr& n, Key key, std::uint64_t size) {
+        if (!n) {
+            // Allocate before changing the tree; a failed allocation leaves all ancestors untouched.
+            n = std::make_unique<Node>(key, size);
+            return;
+        }
+        if (key < n->key) insert_node(n->left, key, size);
+        else if (n->key < key) insert_node(n->right, key, size);
+        else n->size = size;  // replacement is allocation-free
+        rebalance(n);
+    }
+
+    static void erase_node(Ptr& n, Key key) {
+        if (!n) return;
+        if (key < n->key) erase_node(n->left, key);
+        else if (n->key < key) erase_node(n->right, key);
+        else {
+            if (!n->left || !n->right) {
+                // Keep the old node alive until its child has been moved out.
+                Ptr old = std::move(n);
+                n = old->left ? std::move(old->left) : std::move(old->right);
+                return;
+            }
+            const Node* successor = n->right.get();
+            while (successor->left) successor = successor->left.get();
+            n->key = successor->key;
+            n->size = successor->size;
+            erase_node(n->right, n->key);
+        }
+        rebalance(n);
+    }
+
+    // Reverse in-order search of the prefix start <= va. An endpoint bound discards a whole subtree
+    // if even its longest-reaching range ends before the requested final byte.
+    static const Node* search(const Node* n, std::uint64_t va, End last) {
+        if (!n || n->last < last) return nullptr;
+        if (n->key.first > va) return search(n->left.get(), va, last);
+        if (const Node* right = search(n->right.get(), va, last)) return right;
+        if (endpoint(n->key.first, n->size) >= last) return n;
+        return search(n->left.get(), va, last);
+    }
+
+    static Ptr clone(const Node* n) {
+        if (!n) return {};
+        Ptr copy = std::make_unique<Node>(n->key, n->size);
+        copy->left = clone(n->left.get());
+        copy->right = clone(n->right.get());
+        refresh(*copy);
+        return copy;
+    }
+
+    Ptr root_;
 };
 
 } // namespace leonida
