@@ -111,5 +111,8 @@ int main() {
     CHECK(rejected(VK_SUCCESS, 32, VK_SUCCESS, 16) == 2);
     CHECK(rejected(VK_SUCCESS, 32, VK_SUCCESS, 32 + 32 / 16 + 1) == 2);  // more than the buffer it was given
     CHECK(rejected(VK_SUCCESS, 32, VK_INCOMPLETE, 32) == 8);
+    // The queried size plus 1/16 headroom wraps to a tiny buffer on unchecked addition.
+    constexpr size_t max_size = (std::numeric_limits<size_t>::max)();
+    CHECK(rejected(VK_SUCCESS, max_size - max_size / 17 + 17, VK_SUCCESS, 32) == 1);
     return 0;
 }
