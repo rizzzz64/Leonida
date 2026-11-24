@@ -78,8 +78,8 @@ struct LoadResult {
 // "0x..." -> that value; anything else -> joaat(name). Returns false for an empty name or a malformed hex value.
 inline bool parse_model_id(const std::string& text, uint32_t& out) {
     if (text.empty()) return false;
-    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
-        if (text.size() > 10) return false;
+    if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        if (text.size() == 2 || text.size() > 10) return false;
         uint32_t v = 0;
         for (std::size_t i = 2; i < text.size(); ++i) {
             const char c = text[i];
@@ -122,7 +122,13 @@ inline bool parse_mod(std::string_view text, const std::string& folder, Mod& mod
     mod.folder = folder;
     const Json* name = root.find("name");
     mod.name = name && name->kind == Json::Kind::string ? name->string : folder;
-    if (const Json* v = root.find("game_version"); v && v->kind == Json::Kind::string) mod.game_version = v->string;
+    if (const Json* v = root.find("game_version")) {
+        if (v->kind != Json::Kind::string) {
+            error = "\"game_version\" must be a string";
+            return false;
+        }
+        mod.game_version = v->string;
+    }
     if (const Json* e = root.find("enabled")) {
         if (e->kind != Json::Kind::boolean) {
             error = "\"enabled\" must be true or false";

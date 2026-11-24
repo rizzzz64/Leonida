@@ -41,6 +41,8 @@ int main() {
     check(!parse_model_id("0x123456789", id), "a hash wider than 32 bits is refused");
     check(!parse_model_id("0xZZ", id), "a malformed hash is refused");
     check(!parse_model_id("", id), "an empty name is refused");
+    check(!parse_model_id("0x", id) && !parse_model_id("0X", id), "a hash prefix without digits is refused");
+    check(parse_model_id("0x0", id) && id == 0, "a zero hash remains valid");
 
     Mod mod;
     std::string error;
@@ -55,6 +57,11 @@ int main() {
           "a swap of a model with itself is refused");
     check(!parse_mod(R"({"enabled":"yes"})", "m", mod, error), "\"enabled\" must be a boolean");
     check(!parse_mod("[1,2]", "m", mod, error), "a manifest that is not an object is refused");
+    for (const char* invalid : {R"({"game_version":1})", R"({"game_version":null})", R"({"game_version":[]})"})
+        check(!parse_mod(invalid, "m", mod, error) && error.find("game_version") != std::string::npos,
+              "a malformed version constraint is not silently ignored");
+    check(parse_mod(R"({"game_version":"synthetic"})", "m", mod, error) && mod.game_version == "synthetic",
+          "a valid string version is preserved");
     check(parse_mod("{}", "folder_name", mod, error) && mod.name == "folder_name", "the name defaults to the folder");
 
     // The encodings Windows editors and shells write. A UTF-8 byte-order mark is skipped; UTF-16 is named.
