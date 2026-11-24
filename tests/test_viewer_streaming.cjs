@@ -230,7 +230,7 @@ async function freecamFixture(requestPointerLock = async () => { throw new Error
         camera: { position: { toArray: () => [1, 2, 3] } },
         formatCamHash: () => '#cam=1,2,3,0,0',
         history: { replaceState: (_state, _title, hash) => actions.push(hash) },
-        location: { href: 'http://localhost/#cam=1,2,3,0,0' },
+        URLSearchParams, location: { search: '', href: 'http://localhost/#cam=1,2,3,0,0' },
         navigator: { clipboard: { writeText: async url => actions.push(url) } },
     });
     return {
@@ -450,7 +450,7 @@ function fixture(count = 1) {
         clearTimeout: id => timers.delete(id),
         THREE: { MeshStandardMaterial: class {}, Group, DoubleSide: 2,
             LoaderUtils: { extractUrlBase: url => url.slice(0, url.lastIndexOf('/') + 1) || './' } },
-        AbortController,
+        AbortController, shadowsEnabled: false,
         fetch: (url, { signal }) => new Promise((resolve, reject) => {
             const request = { url, signal, reject };
             request.headers = (url = '') => resolve({ ok: true, url, arrayBuffer: () => new Promise((body, fail) => {

@@ -32,7 +32,7 @@
 </div>
 <div id="help">
   <kbd>W A S D</kbd> move · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> fast · <kbd>Ctrl</kbd> slow · wheel: speed<br>
-  <a href="?walk" style="color:var(--accent)">Experimental walk (WASD, Shift sprint, Space jump)</a> · <a href="?" style="color:var(--accent)">Fly</a><br>
+  <a href="?walk" style="color:var(--accent)">Experimental walk (WASD, Shift sprint, Space jump)</a> · <a href="?" style="color:var(--accent)">Fly</a> · add <code>&amp;shadows</code> to enable shadows<br>
   <kbd>F</kbd> wireframe · <kbd>T</kbd> textures/clay · <kbd>G</kbd> chunk bounds · <kbd>R</kbd> back to spawn · <kbd>P</kbd> copy link to this view · <kbd>Esc</kbd> release mouse
 </div>
 <div id="start">Click to fly</div>
@@ -195,6 +195,30 @@ scene.fog = new THREE.Fog(0x9cc3e6, 900, 2600);
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.5, 6000);
 scene.add(new THREE.HemisphereLight(0xdfefff, 0x4a4030, 1.1));
 const sun = new THREE.DirectionalLight(0xfff2dd, 1.6); sun.position.set(0.4, 1, 0.3); scene.add(sun);
+// Shadows are optional: the large exported world can be expensive to render twice.
+const shadowsEnabled = new URLSearchParams(location.search).has("shadows");
+function shadowAnchor(p) {
+  return [p.x, p.y, p.z].map(n => Math.round(n / 16) * 16);
+}
+let lastShadowAnchor = null;
+function followShadowLight(p) {
+  const next = shadowAnchor(p);
+  if (lastShadowAnchor && next.every((n, i) => n === lastShadowAnchor[i])) return;
+  lastShadowAnchor = next;
+  const [x,y,z] = next;
+  sun.target.position.set(x,y,z);
+  sun.position.set(x + 64, y + 160, z + 48);
+}
+if (shadowsEnabled) {
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(1024, 1024);
+  Object.assign(sun.shadow.camera, { left:-96, right:96, top:96, bottom:-96, near:1, far:350 });
+  sun.shadow.camera.updateProjectionMatrix();
+  sun.shadow.normalBias = 0.04;
+  scene.add(sun.target);
+}
 addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 // ---------- freecam ----------
@@ -317,6 +341,12 @@ function toggleBounds() {
     boundsGroup.add(new THREE.Box3Helper(box, 0x5fb3ff));
   }
 }
+function configureChunkShadows(root) {
+  if (!shadowsEnabled) return;
+  root.traverse(n => {
+    if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; }
+  });
+}
 function applyClay(root) {
   clayMat.wireframe = wire;
   (root ? [root] : [...live.values()].map(c => c.obj).filter(Boolean)).forEach(o =>
@@ -408,7 +438,7 @@ async function loadChunk(entry) {
     const g = await loader.parseAsync(bytes, resourcePath);
     // GLTFLoader cannot cancel a parse already underway. Dispose its late result.
     if (live.get(def.id) !== entry) { disposeObject(g.scene); return; }
-    entry.obj = g.scene; scene.add(g.scene); applyClay(g.scene); applyWire(g.scene);
+    entry.obj = g.scene; configureChunkShadows(g.scene); scene.add(g.scene); applyClay(g.scene); applyWire(g.scene);
   } catch {
     if (live.get(def.id) !== entry) return;
     failed++;
@@ -472,7 +502,7 @@ function stream(now = performance.now()) {
     const previous = live.get(def.id);
     const entry = { def, obj: null, loading: true, attempts: (previous?.attempts || 0) + 1, retryAt: 0, previous };
     live.set(def.id, entry);
-    if (world.test) { entry.loading = false; entry.obj = buildTestChunk(def.test); scene.add(entry.obj); applyClay(entry.obj); applyWire(entry.obj); continue; }
+    if (world.test) { entry.loading = false; entry.obj = buildTestChunk(def.test); configureChunkShadows(entry.obj); scene.add(entry.obj); applyClay(entry.obj); applyWire(entry.obj); continue; }
     entry.controller = new AbortController();
     void loadChunk(entry);
   }
@@ -560,6 +590,7 @@ renderer.setAnimationLoop(() => {
   if (v.lengthSq()) camera.position.addScaledVector(v.normalize(), s * dt);
   }
   stream();
+  if (shadowsEnabled) followShadowLight(camera.position);
   renderer.render(scene, camera);
   fpsN++; fpsT += dt; if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
   const p = camera.position, loaded = [...live.values()].filter(c => c.obj).length;

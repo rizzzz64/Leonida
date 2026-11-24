@@ -58,3 +58,10 @@ test('jump is edge-triggered, lands and does not repeat while held', () => {
     advanceWalker(p,state,d,4.2,0.1,floor,true);
     assert(p.y>1.7);
 });
+
+test('shadow anchor is quantized in world space', () => {
+    const anchor = helper('function shadowAnchor(', 'let lastShadowAnchor', 'shadowAnchor');
+    assert.equal(anchor({x:1,y:17,z:-17}).join(','),'0,16,-16');
+    assert.equal(anchor({x:7,y:18,z:-20}).join(','),'0,16,-16');
+    assert.equal(anchor({x:9,y:18,z:-20}).join(','),'16,16,-16');
+});
