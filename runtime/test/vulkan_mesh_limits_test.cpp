@@ -77,5 +77,15 @@ int main() {
     EXPECT(!mesh_limit_refusal(many, limits).empty());
     many.local_size = {64, 4, 1};  // 256 invocations over the 128 allowed
     EXPECT(!mesh_limit_refusal(many, limits).empty());
+    // Synthetic oversized limits and metadata expose a 64-bit product wrap.
+    auto huge = limits;
+    for (auto& axis : huge.maxMeshWorkGroupSize) axis = 0xffffffffu;
+    huge.maxMeshWorkGroupInvocations = 0xffffffffu;
+    many.local_size = {1u << 22, 1u << 22, 1u << 20};  // product is exactly 2^64
+    EXPECT(!mesh_limit_refusal(many, huge).empty());
+    many.local_size = {0xffffffffu, 1, 1};
+    EXPECT(mesh_limit_refusal(many, huge).empty());
+    many.local_size = {0xffffffffu, 1, 2};
+    EXPECT(!mesh_limit_refusal(many, huge).empty());
     return 0;
 }

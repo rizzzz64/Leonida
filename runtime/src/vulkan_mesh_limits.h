@@ -26,10 +26,13 @@ namespace leonida {
 inline std::string mesh_limit_refusal(const ShaderEntry& entry, const VkPhysicalDeviceMeshShaderPropertiesEXT& limits) {
     const auto& n = entry.local_size;
     char text[384];
+    // xy fits uint64_t, but multiplying by z can wrap even a 64-bit product.
+    const std::uint64_t xy = std::uint64_t(n[0]) * n[1];
+    const bool too_many_invocations = n[2] && xy > limits.maxMeshWorkGroupInvocations / n[2];
     if (entry.max_vertices > limits.maxMeshOutputVertices || entry.max_primitives > limits.maxMeshOutputPrimitives ||
         n[0] > limits.maxMeshWorkGroupSize[0] || n[1] > limits.maxMeshWorkGroupSize[1] ||
         n[2] > limits.maxMeshWorkGroupSize[2] ||
-        std::uint64_t(n[0]) * n[1] * n[2] > limits.maxMeshWorkGroupInvocations) {
+        too_many_invocations) {
         std::snprintf(text, sizeof text,
                       "%s needs %u vertices, %u primitives, %ux%ux%u threads; the device allows %u, %u, %u invocations",
                       entry.name.c_str(), entry.max_vertices, entry.max_primitives, n[0], n[1], n[2],
