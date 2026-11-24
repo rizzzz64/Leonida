@@ -751,7 +751,7 @@ public:
     }
     bool draw(Draw&& draw) {
         if (!draw.pipeline) return false;
-        if (!draw.count || !draw.instances) return !closed_;
+        if (!draw.count || !draw.instances || (draw.mesh && !draw.first)) return !closed_;
         return append(std::move(draw));
     }
 
@@ -838,7 +838,13 @@ public:
         if (closed_ || !query.heap || query.type == d3d12_query::timestamp) return false;
         if (find_active(query.heap, query.index) != active_.end()) return false;
         active_.push_back(query);
-        return append(query);
+        try {
+            return append(query);
+        } catch (...) {
+            // A failed command allocation must not leave a query that never began.
+            active_.pop_back();
+            throw;
+        }
     }
 
     bool end_query(const EndQuery& query) {
@@ -846,7 +852,10 @@ public:
         if (query.type != d3d12_query::timestamp) {
             const auto it = find_active(query.heap, query.index);
             if (it == active_.end() || it->type != query.type) return false;
+            // Do not remove the active record until recording EndQuery succeeds.
+            if (!append(query)) return false;
             active_.erase(it);
+            return true;
         }
         return append(query);
     }

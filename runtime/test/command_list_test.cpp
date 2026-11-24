@@ -1,6 +1,8 @@
 #include "../src/command_list.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <new>
 
 #define CHECK(condition) do {                                    \
     if (!(condition)) {                                          \
@@ -9,7 +11,60 @@
     }                                                            \
 } while (0)
 
+// Fail an allocation only during the selected recording operation.
+static thread_local int fail_after = -1;
+void* operator new(std::size_t size) {
+    if (fail_after == 0) { fail_after = -1; throw std::bad_alloc(); }
+    if (fail_after > 0) --fail_after;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+
 int main() {
+    {
+        using namespace leonida;
+        for (int failure = 0; failure < 2; ++failure) {
+            CommandList recording;
+            bool caught = false;
+            fail_after = failure;
+            try { recording.begin_query({1, d3d12_query::occlusion, 0}); }
+            catch (const std::bad_alloc&) { caught = true; }
+            fail_after = -1;
+            CHECK(caught && !recording.queries_open() && recording.commands().empty());
+            CHECK(recording.begin_query({1, d3d12_query::occlusion, 0}));
+            CHECK(recording.end_query({1, d3d12_query::occlusion, 0}));
+        }
+        // Find an EndQuery that needs to grow the recording vector without assuming its growth factor.
+        bool failed_end = false;
+        CommandList recording;
+        for (unsigned i = 0; i < 1024 && !failed_end; ++i) {
+            CHECK(recording.begin_query({1, d3d12_query::occlusion, i}));
+            const auto size = recording.commands().size();
+            fail_after = 0;
+            try { recording.end_query({1, d3d12_query::occlusion, i}); }
+            catch (const std::bad_alloc&) { failed_end = true; }
+            fail_after = -1;
+            if (failed_end) {
+                CHECK(recording.queries_open() && recording.commands().size() == size);
+                CHECK(recording.end_query({1, d3d12_query::occlusion, i}));
+            }
+            // Vary the parity of the vector size so an allocator growing by powers of two
+            // cannot always grow only on BeginQuery.
+            CHECK(recording.marker(DebugMarker::Kind::set));
+        }
+        CHECK(failed_end && !recording.queries_open());
+        CommandList draws;
+        Draw mesh{};
+        mesh.pipeline = 1; mesh.mesh = true; mesh.count = mesh.instances = 1; mesh.first = 0;
+        CHECK(draws.draw(mesh) && draws.commands().empty());
+        CHECK(draws.draw(std::move(mesh)) && draws.commands().empty());
+    }
+
     using namespace leonida;
     namespace s = d3d12_state;
     CommandList list;
