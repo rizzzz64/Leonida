@@ -86,25 +86,26 @@ class DumpWords(unittest.TestCase):
 
 class PackedFormatFixture(unittest.TestCase):
     def test_filtered_suite_counts_a_packed_store_mismatch(self):
-        name = "cs_fmt_1010102"
-        with tempfile.TemporaryDirectory() as tmp:
-            args = SimpleNamespace(filter=name, build=tmp, llvm_mc="unused")
+        problem = "word 15: expected 0xffe00003, got 0xe00003ff"
+        fixtures = (("cs_fmt_1010102", "fmt_1010102_test"), ("cs_tbuffer_store", "tbuffer_store_test"))
+        for name, checker in fixtures:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                args = SimpleNamespace(filter=name, build=tmp, llvm_mc="unused")
 
-            def translate(_cmd, env=None, gpu=True):
-                (Path(tmp) / "spirv" / f"{name}.spv").touch()
-                return 0, ""
+                def translate(_cmd, env=None, gpu=True):
+                    (Path(tmp) / "spirv" / f"{name}.spv").touch()
+                    return 0, ""
 
-            output = io.StringIO()
-            problem = "word 15: expected 0xffe00003, got 0xe00003ff"
-            with (patch.object(rgt, "assemble_to_s", side_effect=lambda _mc, _src, dst, _name: Path(dst).touch()),
-                  patch.object(rgt, "spirv_as"),
-                  patch.object(rgt, "run_cmd", side_effect=translate),
-                  patch.object(rgt, "fmt_1010102_test", return_value=problem) as check_fmt,
-                  contextlib.redirect_stdout(output)):
-                self.assertEqual(rgt.run_suite(args, tmp), 1)
-            check_fmt.assert_called_once()
-            self.assertIn(problem, output.getvalue())
-            self.assertIn("0/1 passed", output.getvalue())
+                output = io.StringIO()
+                with (patch.object(rgt, "assemble_to_s", side_effect=lambda _mc, _src, dst, _name: Path(dst).touch()),
+                      patch.object(rgt, "spirv_as"),
+                      patch.object(rgt, "run_cmd", side_effect=translate),
+                      patch.object(rgt, checker, return_value=problem) as check_fmt,
+                      contextlib.redirect_stdout(output)):
+                    self.assertEqual(rgt.run_suite(args, tmp), 1)
+                check_fmt.assert_called_once()
+                self.assertIn(problem, output.getvalue())
+                self.assertIn("0/1 passed", output.getvalue())
 
 
 class FrameReadbackTest(unittest.TestCase):

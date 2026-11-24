@@ -19,7 +19,7 @@ Sources, each optional and reported as missing rather than counted as zero when 
     imports         the measured import tables in docs/runtime_imports.md
     corpus          --work: counts per stage from <work>/shaders/dxbc/index.json and <work>/shaders/spirv/index.json
     github          --github, read-only through `gh`: every pull request into main (merged = implemented, open =
-                    partial), latest CI runs on main, an optional D3D- tracker checked against those merges, the
+                    partial), latest observed CI runs (--ci-branch, default main), an optional D3D- tracker checked against those merges, the
                     coordination issue's section sizes and, with --login, that account's claims and pull requests
 
 No game data leaves the inputs: the page and the JSON carry counts, pass/fail, error classes and the project's
@@ -831,11 +831,99 @@ def collect_pulls(col, repo, merged, open_prs, limit=PR_LIMIT):
              "items": item_ids(p.get("title")), "author": (p.get("author") or {}).get("login")} for p in latest]
 
 
-def collect_github(col, repo, login, d3d_issue=None):
+CI_RUN_LIMIT = 40
+CI_WORKFLOW_LIMIT = 1000
+
+
+def ci_run_result(run):
+    """Dashboard status, precise CI state and next action; never turn missing evidence into a pass."""
+    status, conclusion = run.get("status"), run.get("conclusion")
+    if status == "action_required" or conclusion == "action_required":
+        return "blocked", "authorization_pending", "Maintainer: review the external workflow before authorizing it."
+    if status in ("queued", "requested", "waiting", "pending", "in_progress"):
+        return "unknown", "pending", "Wait for completion; inspect the run for queue, concurrency or approval blockers."
+    if status == "completed":
+        if conclusion == "success":
+            return "verified", "passed", "Inspect the linked run for its scope; this is not a verdict on all required checks."
+        if conclusion in ("failure", "timed_out", "startup_failure"):
+            return "failed", "failed", "Inspect failed jobs and steps in the linked run; preserve the failing gate."
+        if conclusion == "skipped":
+            return "unknown", "skipped", "Check workflow/job conditions and prerequisites; skipped is not tested."
+        if conclusion == "cancelled":
+            return "unknown", "cancelled", "Check cancellation or a superseding run; rerun only if still needed."
+        if conclusion == "neutral":
+            return "unknown", "neutral", "Inspect the run; a neutral result does not establish a passing check."
+    return "unknown", "unknown", "Inspect the run's status and conclusion; no pass or failure can be inferred."
+
+
+def collect_ci(col, repo, branch):
+    """Read metadata only. Run history is bounded; absence does not identify a trigger skip."""
+    col.panel("ci", f"CI on {branch}", "workflows")
+    runs = gh_json(["run", "list", "-R", repo, "--branch", branch, "--all", "--limit", str(CI_RUN_LIMIT),
+                    "--json", "workflowDatabaseId,workflowName,conclusion,status,headSha,createdAt,url,databaseId,attempt,event"])
+    workflows = gh_json(["workflow", "list", "-R", repo, "--all", "--limit", str(CI_WORKFLOW_LIMIT),
+                         "--json", "id,name,path,state"])
+    latest = {}
+    # Stable IDs keep renamed workflows together and equally named workflows separate.
+    for r in sorted(runs or [], key=lambda r: (r.get("createdAt") or "", r["databaseId"]), reverse=True):
+        latest.setdefault(r["workflowDatabaseId"], r)
+    inventory = {w["id"]: w for w in workflows or []}
+    col.source("github_ci", None, "invalid" if runs is None else "ok", len(latest),
+               note=f"Latest observed run per workflow on {branch}, within {CI_RUN_LIMIT} runs across all events. "
+                    + ("Run query failed: check gh authentication, read access and network."
+                       if runs is None else "Absence does not prove a skip or missing configuration; not a required-check verdict."))
+    col.source("github_ci_workflows", None, "invalid" if workflows is None else "ok", len(inventory),
+               note=("Workflow inventory query failed: check gh authentication, read access and network."
+                     if workflows is None else f"Repository-wide configuration, including disabled workflows; limit {CI_WORKFLOW_LIMIT}."
+                     + (" Limit reached; inventory may be incomplete." if len(workflows) >= CI_WORKFLOW_LIMIT else "")))
+    for wid in sorted(set(latest) | set(inventory)):
+        r, w = latest.get(wid), inventory.get(wid, {})
+        configuration = w.get("state")
+        disabled = configuration in ("disabled_manually", "disabled_inactivity", "disabled_fork", "deleted")
+        if r:
+            status, state, action = ci_run_result(r)
+            what = f"{state}: status={r.get('status') or 'unknown'}, conclusion={r.get('conclusion') or 'unknown'}"
+            what += f"; associated head {(r.get('headSha') or 'unknown')[:10]}; event={r.get('event') or 'unknown'}"
+        elif disabled:
+            status, state = "missing", "not_configured"
+            what = "not configured for execution"
+            action = "Maintainer: check whether this workflow should be enabled or restored."
+        elif runs is None:
+            status, state = "unknown", "source_unavailable"
+            what = "run evidence unavailable"
+            action = "Check gh authentication, read access and network; refresh the report."
+        elif configuration == "active":
+            status, state = "unknown", "not_observed"
+            what = f"no run observed on {branch} in the last {CI_RUN_LIMIT} runs"
+            action = "Check branch/path/event triggers and a wider run history; do not infer a skip."
+        else:
+            status, state = "unknown", "unknown"
+            what = "workflow configuration is unknown"
+            action = "Inspect repository Actions settings and workflow metadata."
+        if configuration:
+            what += f"; repository configuration={configuration}"
+            if r and disabled:
+                action += " Maintainer: also check whether this disabled workflow should be enabled or restored."
+        r = r or {}
+        col.add(f"ci.{wid}", "ci", "latest observed run per workflow", w.get("name") or r.get("workflowName") or str(wid),
+                status, detail=f"{what}. {action}", ci_state=state, action=action, configuration_state=configuration,
+                workflow_id=wid, workflow_path=w.get("path"), branch=branch, head_sha=r.get("headSha"),
+                run_id=r.get("databaseId"), run_attempt=r.get("attempt"), event=r.get("event"),
+                run_status=r.get("status"), conclusion=r.get("conclusion"), at=r.get("createdAt"), url=r.get("url"))
+    if not latest and not inventory:
+        unavailable = runs is None or workflows is None
+        state = "source_unavailable" if unavailable else "not_configured"
+        action = ("Check gh authentication, read access and network; refresh the report." if unavailable else
+                  "Maintainer: inspect Actions settings and expected workflow files; no workflows were returned.")
+        col.add("ci.inventory", "ci", "workflow configuration", "CI workflows", "unknown" if unavailable else "missing",
+                detail=f"{state}. {action}", ci_state=state, action=action, branch=branch)
+
+
+def collect_github(col, repo, login, d3d_issue=None, ci_branch='main'):
     col.panel("d3d12", "D3D12 → Vulkan layer items", "D3D- items")
-    col.panel("ci", "CI on main", "workflows")
+    col.panel("ci", f"CI on {ci_branch}", "workflows")
     if not shutil.which("gh"):
-        col.source("github", None, "missing", note="gh is not installed")
+        col.source("github", None, "missing", note="gh is not installed; install GitHub CLI to read CI evidence")
         return {}
     summary = {"repo": repo}
     # every pull request into main, so a merge shows up on the next run even before a tracking table is edited
@@ -850,27 +938,7 @@ def collect_github(col, repo, login, d3d_issue=None):
     else:
         summary["merged_latest"] = collect_pulls(col, repo, merged, open_prs)
         merged_set, open_set = {p["number"] for p in merged}, {p["number"] for p in open_prs}
-    runs = gh_json(["run", "list", "-R", repo, "--branch", "main", "--limit", "40",
-                    "--json", "workflowName,conclusion,status,headSha,createdAt,url"])
-    if runs is None:
-        col.source("github_ci", None, "invalid", note="gh run list failed (not logged in?)")
-    else:
-        latest, pending = {}, {}
-        for r in runs:      # newest first: the first completed run per workflow decides; a newer one still running is noted
-            if r["status"] == "completed":
-                latest.setdefault(r["workflowName"], r)
-            elif r["workflowName"] not in latest:
-                pending.setdefault(r["workflowName"], r)
-        for name in sorted(set(latest) | set(pending)):
-            r, newer = latest.get(name), pending.get(name)
-            if r is None:
-                status, what, r = "unknown", f"no completed run in the last 40; one {newer['status']}", newer
-            else:
-                status, what = ("verified" if r["conclusion"] == "success" else "failed"), r["conclusion"]
-            col.add(f"ci.{name}", "ci", "latest completed run per workflow", name, status,
-                    detail=f"{what} on {r['headSha'][:10]}" + (f"; a newer run is {newer['status']}" if newer and newer is not r else ""),
-                    at=r["createdAt"], url=r.get("url"))
-        col.source("github_ci", None, "ok", len(latest))
+    collect_ci(col, repo, ci_branch)
     issue = gh_json(["issue", "view", str(d3d_issue), "-R", repo, "--json", "body,updatedAt"]) if d3d_issue else None
     if not d3d_issue:
         col.source("github_d3d_tracker", None, "skipped", note="no --d3d-issue supplied")
@@ -957,7 +1025,7 @@ def build(args, out_dir):
     collect_contract(col)
     collect_imports(col)
     collect_corpus(col, args.work)
-    gh = collect_github(col, args.repo, args.login, args.d3d_issue) if args.github else {}
+    gh = collect_github(col, args.repo, args.login, args.d3d_issue, args.ci_branch or "main") if args.github else {}
     if not args.github:
         col.source("github", None, "skipped", note="pass --github to read pull requests into main, CI and project trackers")
     snap = {
@@ -1022,9 +1090,14 @@ def main(argv=None):
                     help="saved output of runtime/test/shaders/check.py; LABEL names the GPU, driver and OS")
     ap.add_argument("--github", action="store_true", help="read pull requests into main, CI runs and project trackers through gh")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"GitHub repository (default {DEFAULT_REPO})")
+    ap.add_argument("--ci-branch", help="with --github, CI branch to inspect (default main; PR panels still use main)")
     ap.add_argument("--d3d-issue", type=int, help="optional D3D12 tracker issue number in --repo")
     ap.add_argument("--login", help="with --github, show this account's claims and pull requests")
     args = ap.parse_args(argv)
+    if args.ci_branch is not None and not args.github:
+        ap.error("--ci-branch requires --github")
+    if args.ci_branch is not None and not args.ci_branch.strip():
+        ap.error("--ci-branch must not be empty")
     if args.login is not None and not args.github:
         ap.error("--login requires --github")
     if args.d3d_issue is not None and (args.d3d_issue < 1 or not args.github):

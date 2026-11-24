@@ -29,7 +29,7 @@ are read directly; there is no need to re-save them as UTF-8.
 | Shader corpus | `--work <work>`: counts per stage from `<work>/shaders/dxbc/index.json` and `<work>/shaders/spirv/index.json` | shaders, aggregated per stage |
 | Pull requests into main | `--github`: pull requests into `main` of `--repo` (default `LeonidaReforge/Leonida`), grouped by item ID in the title | pull request |
 | D3D12 layer | `--github --d3d-issue <number>`: an optional `D3D-` table in the selected repository, checked against its merged and open pull requests. The original project's issue #313 is historical and not queried by default. | item |
-| CI on main | `--github`: the latest completed run of each workflow on `main` | workflow |
+| CI | `--github`: the latest observed run per workflow on `--ci-branch` (default `main`), plus repository-wide workflow configuration | workflow |
 
 Every run with `--github` reads the pull requests again, so a merge into `main` shows up on the next run as
 IMPLEMENTED, even before a tracking table's PR column is edited. A pull request closed without merging is
@@ -39,6 +39,49 @@ limit is reached.
 
 With `--github --login <account>` the page also lists that account's claims in the coordination issue (and the issue
 it continues) and its pull requests. Nothing is posted: every `gh` call is a read.
+
+## CI results (CI-11)
+
+To inspect the recovery branch while keeping the pull-request panels on `main`:
+
+```powershell
+python -I tools/progress_dashboard.py --out ..\leonida_progress --github --ci-branch integration/ci-recovery
+```
+
+The CI panel selects the newest observed run of each workflow, including incomplete runs. An older pass cannot
+hide a newer cancellation or authorization request. Workflows are matched by ID, so a rename does not split a
+workflow, and two workflows with the same name stay separate. Each cell's details include the raw status and
+conclusion, associated head SHA, event, run ID, attempt and link, plus an action to take. The associated head SHA
+is GitHub's `headSha` metadata; it does not establish the exact PR merge commit checked out by a runner.
+
+| CI state in JSON/details | Dashboard status | What to do |
+|---|---|---|
+| `passed` | VERIFIED | Inspect the linked successful run for its actual scope |
+| `failed` (`failure`, `timed_out`, `startup_failure`) | FAILED | Inspect failed jobs and steps; keep the failing gate |
+| `skipped` | UNKNOWN | Check conditions and prerequisites; no execution is established |
+| `cancelled` | UNKNOWN | Check cancellation or a superseding run before requesting a rerun |
+| `authorization_pending` (`action_required`) | BLOCKED | A maintainer reviews the external workflow before authorizing it |
+| `pending` (`queued`, `requested`, `waiting`, `pending`, `in_progress`) | UNKNOWN | Wait; inspect queue, concurrency and approval blockers |
+| `not_configured` | MISSING | The repository inventory explicitly reports a disabled/deleted workflow, or returns no workflows; a maintainer checks whether it should be enabled/restored |
+| `not_observed` | UNKNOWN | An active workflow has no run in the queried history; check branch/path/event triggers and a wider history |
+| `source_unavailable` | UNKNOWN | Check GitHub CLI authentication, read access and network, then refresh |
+| `neutral` or `unknown` | UNKNOWN | Inspect the metadata; neither establishes a passing check |
+
+Configuration and execution are separate evidence. A disabled workflow with an observed failure keeps that failure
+visible and records its disabled configuration too. A failed query never establishes a disabled workflow. No run
+in the history does **not** prove a path-filter skip, pending authorization, or missing configuration.
+
+The run query covers at most 40 runs on the selected branch across all events, and selects one latest run per
+workflow. Older events and runs may be absent. The separate repository-wide inventory includes disabled workflows,
+at most 1000 entries, and is not a branch-specific workflow or CTest inventory. Both limits and query errors appear
+under Sources. This panel does not inspect individual jobs, steps or test cases: a successful workflow may contain
+skips. It is not an aggregate required-check verdict, a branch-head freshness guarantee, or the stable required
+summary check recommended in [GOVERNANCE.md](../GOVERNANCE.md#recommended-hosting-and-continuity-controls).
+
+Reporting only reads metadata through `gh run list` and `gh workflow list`. It does not authorize, rerun or cancel
+anything, change workflow permissions, alter gates, or change test exit codes. Dashboard generation still returns
+its existing exit status for report generation; CI failures remain evidence in the report. CI-10's CTest inventory,
+CI-15's Linux failure aggregation and #7's unit-test freshness are separate work.
 
 ## How a status is decided
 
