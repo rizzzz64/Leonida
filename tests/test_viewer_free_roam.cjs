@@ -45,3 +45,16 @@ test('gravity lands on floor, blocks walls and waits for missing geometry', () =
     advanceWalker(p,state,{x:1,z:0},4.2,0.1,floor);
     assert(Math.abs(p.x-0.42)<1e-9); assert(!state.waiting);
 });
+
+test('jump is edge-triggered, lands and does not repeat while held', () => {
+    const { advanceWalker } = helper('// ---------- walk physics (pure) ----------', '// ---------- end walk physics ----------', '{ advanceWalker }');
+    const p = {x:0,y:1.7,z:0}, state = {vy:0,grounded:true,waiting:false,jumpHeld:false};
+    const floor = {ground:()=>0,blocked:()=>false}, d = {x:0,z:0};
+    advanceWalker(p,state,d,4.2,0.1,floor,true);
+    assert(p.y>1.7 && !state.grounded);
+    for(let i=0;i<30;i++) advanceWalker(p,state,d,4.2,0.1,floor,true);
+    assert.equal(p.y,1.7); assert(state.grounded);
+    advanceWalker(p,state,d,4.2,0.1,floor,false);
+    advanceWalker(p,state,d,4.2,0.1,floor,true);
+    assert(p.y>1.7);
+});

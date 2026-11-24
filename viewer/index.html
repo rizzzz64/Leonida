@@ -32,7 +32,7 @@
 </div>
 <div id="help">
   <kbd>W A S D</kbd> move · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> fast · <kbd>Ctrl</kbd> slow · wheel: speed<br>
-  <a href="?walk" style="color:var(--accent)">Experimental walk camera</a> · <a href="?" style="color:var(--accent)">Fly</a><br>
+  <a href="?walk" style="color:var(--accent)">Experimental walk (WASD, Shift sprint, Space jump)</a> · <a href="?" style="color:var(--accent)">Fly</a><br>
   <kbd>F</kbd> wireframe · <kbd>T</kbd> textures/clay · <kbd>G</kbd> chunk bounds · <kbd>R</kbd> back to spawn · <kbd>P</kbd> copy link to this view · <kbd>Esc</kbd> release mouse
 </div>
 <div id="start">Click to fly</div>
@@ -208,12 +208,17 @@ function walkingDirection(keys, yaw) {
   return { x: (side * Math.cos(yaw) - forward * Math.sin(yaw)) / norm,
            z: (-side * Math.sin(yaw) - forward * Math.cos(yaw)) / norm };
 }
-const WALK_SPEED = 4.2;
-const walkState = { vy: 0, grounded: false, waiting: false };
+const WALK_SPEED = 4.2, SPRINT_SPEED = 7.0;
+function walkingInput(keys, yaw) {
+  const direction = walkingDirection(keys, yaw);
+  const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight");
+  return { direction, speed: sprint ? SPRINT_SPEED : WALK_SPEED, jump: keys.has("Space") };
+}
+const walkState = { vy: 0, grounded: false, waiting: false, jumpHeld: false };
 
 // ---------- walk physics (pure) ----------
 const EYE_HEIGHT = 1.7, STEP_HEIGHT = 0.35, WALK_GRAVITY = 9.81, PHYSICS_STEP = 1 / 60;
-function stepWalker(p, state, dx, dz, dt, probe) {
+function stepWalker(p, state, dx, dz, dt, probe, jump = false) {
   const foot = p.y - EYE_HEIGHT;
   let floor = probe.ground(p.x, p.z, foot + STEP_HEIGHT);
   state.waiting = floor === null;
@@ -225,6 +230,9 @@ function stepWalker(p, state, dx, dz, dt, probe) {
     if (next === null || next > foot + STEP_HEIGHT) continue;
     p.x += sx; p.z += sz; floor = next;
   }
+  if (jump && state.grounded && Math.abs(foot - floor) < 0.05) {
+    state.vy = 4.8; state.grounded = false;
+  }
   state.vy = Math.max(-55, state.vy - WALK_GRAVITY * dt);
   const nextFoot = foot + state.vy * dt;
   if (state.vy <= 0 && nextFoot <= floor) {
@@ -233,11 +241,14 @@ function stepWalker(p, state, dx, dz, dt, probe) {
     p.y = nextFoot + EYE_HEIGHT; state.grounded = false;
   }
 }
-function advanceWalker(p, state, direction, speed, dt, probe) {
+function advanceWalker(p, state, direction, speed, dt, probe, jumpHeld = false) {
+  let jump = jumpHeld && !state.jumpHeld;
+  state.jumpHeld = jumpHeld;
   let remaining = Math.min(Math.max(dt, 0), 0.1);
   while (remaining > 1e-8) {
     const step = Math.min(remaining, PHYSICS_STEP);
-    stepWalker(p, state, direction.x * speed * step, direction.z * speed * step, step, probe);
+    stepWalker(p, state, direction.x * speed * step, direction.z * speed * step, step, probe, jump);
+    jump = false;
     remaining -= step;
   }
 }
@@ -272,12 +283,13 @@ addEventListener("keydown", e => {
   keys.add(e.code);
   // Track Ctrl for slow movement, but leave modified shortcuts to the browser.
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (walkMode && e.code === "Space") e.preventDefault();
   if (e.code === "KeyF" && !e.repeat) wire = !wire, applyWire();
   if (e.code === "KeyT" && !e.repeat) clay = !clay, applyClay();
   if (e.code === "KeyG" && !e.repeat) toggleBounds();
   if (e.code === "KeyR") {
     camera.position.fromArray(world.spawn);
-    Object.assign(walkState, { vy: 0, grounded: false, waiting: false });
+    Object.assign(walkState, { vy: 0, grounded: false, waiting: false, jumpHeld: false });
   }
   if (e.code === "KeyP" && !e.repeat) {
     history.replaceState(null, "", formatCamHash(camera.position.toArray(), yaw, pitch));
@@ -537,8 +549,8 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
   if (walkMode) {
-    const d = walkingDirection(keys, yaw);
-    advanceWalker(camera.position, walkState, d, WALK_SPEED, dt, makeWalkProbe(camera.position));
+    const input = walkingInput(keys, yaw);
+    advanceWalker(camera.position, walkState, input.direction, input.speed, dt, makeWalkProbe(camera.position), input.jump);
   } else {
   camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
   const v = new THREE.Vector3(), s = speed * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 5 : 1) * (keys.has("ControlLeft") || keys.has("ControlRight") ? 0.2 : 1);
