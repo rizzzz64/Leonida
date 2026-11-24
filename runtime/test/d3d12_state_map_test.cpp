@@ -660,6 +660,13 @@ int main() {
         CHECK(!resizable_bar(memory({{8ull << 30, 0}}, {{local | host, 0}})));
         CHECK(!resizable_bar(memory({{8ull << 30, vram}}, {{local | host, 1}})));
         CHECK(!resizable_bar(VkPhysicalDeviceMemoryProperties{}));
+        // A malformed property snapshot can claim more heaps than the fixed Vulkan array holds.
+        VkPhysicalDeviceMemoryProperties malformed{};
+        malformed.memoryHeapCount = VK_MAX_MEMORY_HEAPS + 1;
+        malformed.memoryTypeCount = 1;
+        malformed.memoryTypes[0] = {local | host, VK_MAX_MEMORY_HEAPS};
+        CHECK(!resizable_bar(malformed));
+        CHECK(memory_type_order(malformed, 1, host, local, 1).empty());
     }
 
     // D3D-299: a texture (required 0, preferred DEVICE_LOCAL) in host memory has spilled; the arena (required

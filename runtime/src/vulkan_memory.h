@@ -28,7 +28,8 @@ inline bool resizable_bar(const VkPhysicalDeviceMemoryProperties& memory) {
                                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     for (std::uint32_t i = 0; i < memory.memoryTypeCount && i < VK_MAX_MEMORY_TYPES; ++i) {
         const VkMemoryType& type = memory.memoryTypes[i];
-        if ((type.propertyFlags & wanted) != wanted || type.heapIndex >= memory.memoryHeapCount) continue;
+        if ((type.propertyFlags & wanted) != wanted || type.heapIndex >= memory.memoryHeapCount ||
+            type.heapIndex >= VK_MAX_MEMORY_HEAPS) continue;
         const VkMemoryHeap& heap = memory.memoryHeaps[type.heapIndex];
         if ((heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && heap.size > kBarWindowBytes) return true;
     }
@@ -49,7 +50,8 @@ inline std::vector<std::uint32_t> memory_type_order(const VkPhysicalDeviceMemory
         for (std::uint32_t i = 0; i < memory.memoryTypeCount && i < VK_MAX_MEMORY_TYPES; ++i) {
             const VkMemoryType& type = memory.memoryTypes[i];
             if (!(type_bits & (1u << i)) || (type.propertyFlags & flags) != flags) continue;
-            if (type.heapIndex >= memory.memoryHeapCount || memory.memoryHeaps[type.heapIndex].size < size) continue;
+            if (type.heapIndex >= memory.memoryHeapCount || type.heapIndex >= VK_MAX_MEMORY_HEAPS ||
+                memory.memoryHeaps[type.heapIndex].size < size) continue;
             if (std::find(order.begin(), order.end(), i) == order.end()) order.push_back(i);
         }
     }
