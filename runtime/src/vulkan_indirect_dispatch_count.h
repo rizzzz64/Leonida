@@ -71,11 +71,14 @@ public:
             info.size = bytes;
             info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-            Allocation scratch{};
-            if (owner.fn<PFN_vkCreateBuffer>("vkCreateBuffer")(owner.device_, &info, nullptr, &scratch.buffer) != VK_SUCCESS)
-                return false;
-            allocations.push_back(scratch);  // all failure paths free it with the batch
+            // Allocate the ownership record before creating the Vulkan handle.
+            // A vector growth failure must never orphan a live scratch buffer.
+            allocations.emplace_back();
             auto& a = allocations.back();
+            if (owner.fn<PFN_vkCreateBuffer>("vkCreateBuffer")(owner.device_, &info, nullptr, &a.buffer) != VK_SUCCESS) {
+                allocations.pop_back();
+                return false;
+            }
             VkMemoryRequirements requirements{};
             owner.fn<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(
                 owner.device_, a.buffer, &requirements);
@@ -106,8 +109,16 @@ public:
             if (!args_va || !count_va || !output_va ||
                 argument_offset > UINT64_MAX - args_va || count_offset > UINT64_MAX - count_va)
                 return false;
-            out = {a.buffer, 0, args_va + argument_offset, count_va + count_offset,
-                   output_va, stride, max_count};
+            const VkDeviceAddress args_start = args_va + argument_offset;
+            const VkDeviceAddress count_start = count_va + count_offset;
+            // Validate the entire address span, not only its first byte. The shader reads
+            // three words of each strided record, a count word, and writes tight records.
+            const VkDeviceSize args_span = VkDeviceSize(max_count - 1) * stride + record_bytes;
+            if (args_span - 1 > UINT64_MAX - args_start ||
+                sizeof(std::uint32_t) - 1 > UINT64_MAX - count_start ||
+                bytes - 1 > UINT64_MAX - output_va)
+                return false;
+            out = {a.buffer, 0, args_start, count_start, output_va, stride, max_count};
             return true;
         }
     };

@@ -257,6 +257,13 @@ int main() {
         CHECK(!batch->prepare(args_buf, 0, count_buf, 6, 12, 16u, out));
         CHECK(state.create_buffer_calls == 0);
         CHECK(out.indirect == VK_NULL_HANDLE);
+        // Mock addresses are base + handle * 16. First address fits, last record does not.
+        const auto args_va = UINT64_C(0x10000000) + 100 * 16;
+        const auto count_va = UINT64_C(0x10000000) + 200 * 16;
+        CHECK(!batch->prepare(args_buf, UINT64_MAX - args_va - 3, count_buf, 0, 12, 2u, out));
+        CHECK(out.indirect == VK_NULL_HANDLE);
+        // A four-byte count ending exactly at UINT64_MAX remains representable.
+        CHECK(batch->prepare(args_buf, 0, count_buf, UINT64_MAX - count_va - 3, 12, 1u, out));
     }
 
     // 5. Happy path chunking in emit(): 130 records with maxComputeWorkGroupCount[0] = 2 -> chunks of 128 and 2.
