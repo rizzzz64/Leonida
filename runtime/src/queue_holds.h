@@ -66,9 +66,8 @@ public:
         if (held_.load(std::memory_order_acquire) == 0 || in_pump()) return;
         {
             std::lock_guard pump(pump_mutex_);
-            in_pump() = true;  // what is dropped may release other fences: they must not wait for this lock
+            PumpScope scope(this);  // what is dropped may release other fences: they must not wait for this lock
             for (Holder* holder : snapshot()) holder->discard_waiting_on(semaphore);
-            in_pump() = false;
         }
         pump_ready();
     }
@@ -165,7 +164,7 @@ public:
         for (;;) {
             std::unique_lock pump(pump_mutex_, std::try_to_lock);
             if (!pump) return;  // another thread is releasing and will see dirty_
-            in_pump() = true;
+            PumpScope scope(this);
             while (dirty_.exchange(false, std::memory_order_acq_rel)) {
                 bool progress = true;
                 while (progress) {
@@ -174,7 +173,6 @@ public:
                 }
                 run_barriers();
             }
-            in_pump() = false;
             pump.unlock();
             if (!dirty_.load(std::memory_order_acquire)) return;
         }
@@ -187,9 +185,22 @@ private:
         std::function<void()> fn;
     };
 
-    static bool& in_pump() {
-        static thread_local bool pumping = false;
-        return pumping;
+    // Track active instances, not just the Semaphore type. A callback may pump a different
+    // device on this thread, or reenter an ancestor through another device. No allocation.
+    struct PumpScope {
+        const QueueHolds* owner;
+        PumpScope* previous;
+        inline static thread_local PumpScope* top = nullptr;
+        explicit PumpScope(const QueueHolds* instance) noexcept : owner(instance), previous(top) { top = this; }
+        ~PumpScope() { top = previous; }
+        PumpScope(const PumpScope&) = delete;
+        PumpScope& operator=(const PumpScope&) = delete;
+    };
+
+    bool in_pump() const noexcept {
+        for (auto* scope = PumpScope::top; scope; scope = scope->previous)
+            if (scope->owner == this) return true;
+        return false;
     }
 
     std::vector<Holder*> snapshot() const {
