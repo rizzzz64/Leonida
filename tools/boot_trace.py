@@ -84,7 +84,7 @@ def parse_startup(path: str, limit: int = 10) -> dict:
                 event = json.loads(line)
                 if isinstance(event, dict) and event.get("kind") == "exit" and type(event.get("code")) is not int:
                     event = None
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 trace["bad_lines"] += 1
                 if len(trace["bad_line_numbers"]) < limit:
                     trace["bad_line_numbers"].append(number)
@@ -201,7 +201,13 @@ def parse_d3d12(path: str, limit: int = 10) -> dict:
                 if line.strip():
                     trace["ignored_lines"] += 1
                 continue
-            seq, method, outcome = int(match.group(1)), match.group(2), match.group(3)
+            try:
+                seq = int(match.group(1))
+            except ValueError:
+                # Python limits decimal integer conversion; a damaged trace must not abort the report.
+                trace["ignored_lines"] += 1
+                continue
+            method, outcome = match.group(2), match.group(3)
             trace["calls"] += 1
             expected = trace["last_seq"] + 1
             if seq != expected:

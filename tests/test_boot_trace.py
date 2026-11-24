@@ -210,6 +210,34 @@ class BootTraceTests(unittest.TestCase):
         self.assertEqual(trace["events"], 2)
         self.assertEqual(trace["bad_lines"], 1)
 
+    def test_oversized_numbers_do_not_discard_valid_surrounding_events(self):
+        if not hasattr(sys, "set_int_max_str_digits"):
+            self.skipTest("Python has no integer-string limit")
+        old_limit = sys.get_int_max_str_digits()
+        try:
+            sys.set_int_max_str_digits(640)
+            huge = "9" * 641
+            with open(self.startup, "w", encoding="utf-8", newline="\n") as f:
+                f.write('{"kind":"trace_open","pid":1}\n')
+                f.write('{"kind":"exit","code":' + huge + '}\n')
+                f.write('{"kind":"exit","code":0}\n')
+            trace = bt.parse_startup(self.startup)
+            self.assertEqual(trace["events"], 2)
+            self.assertEqual(trace["bad_lines"], 1)
+            self.assertEqual(trace["bad_line_numbers"], [2])
+            self.assertEqual(trace["exit"], 0)
+            self.write_lines(self.d3d12, [
+                "[d3d12-trace] #1 First ok",
+                "[d3d12-trace] #" + huge + " Broken failed",
+                "[d3d12-trace] #2 Second ok",
+            ])
+            trace = bt.parse_d3d12(self.d3d12)
+            self.assertEqual(trace["calls"], 2)
+            self.assertEqual(trace["ignored_lines"], 1)
+            self.assertEqual(trace["sequence_break_count"], 0)
+        finally:
+            sys.set_int_max_str_digits(old_limit)
+
     def test_malformed_exit_records_preserve_the_last_valid_code(self):
         for code in (0, -7):
             with self.subTest(code=code):
