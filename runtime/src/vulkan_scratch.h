@@ -11,8 +11,11 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <new>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -46,32 +49,53 @@ public:
         constexpr VkDeviceSize alignment = 256, minimum = 4u << 20;
         if (!loaded_ || !bytes) return false;
         for (auto& chunk : current_.chunks) {
-            const VkDeviceSize start = (chunk.used + alignment - 1) / alignment * alignment;
-            if (start <= chunk.size && bytes <= chunk.size - start) {
+            const VkDeviceSize padding = (alignment - chunk.used % alignment) % alignment;
+            if (padding > chunk.size - chunk.used) continue;
+            const VkDeviceSize start = chunk.used + padding;
+            if (bytes <= chunk.size - start) {
                 chunk.used = start + bytes;
                 buffer = chunk.buffer;
                 offset = start;
                 return true;
             }
         }
+        // Prepare ownership bookkeeping before acquiring a buffer. In particular, reserve the
+        // retirement slot before any commands can reference this batch: retire() also runs in a
+        // destructor and after vkQueueSubmit, where an allocation failure is too late.
+        try {
+            if (current_.chunks.empty()) reserve_one(retired_);
+            reserve_one(current_.chunks);
+        } catch (const std::bad_alloc&) {
+            return false;
+        } catch (const std::length_error&) {
+            return false;
+        }
+
         Chunk chunk;
-        for (std::size_t i = 0; i < spare_.size(); ++i)
+        for (std::size_t i = 0; i < spare_count_; ++i)
             if (spare_[i].size >= bytes) {
                 chunk = spare_[i];
-                spare_.erase(spare_.begin() + std::ptrdiff_t(i));
+                for (std::size_t j = i + 1; j < spare_count_; ++j) spare_[j - 1] = spare_[j];
+                spare_[--spare_count_] = {};
                 break;
             }
-        if (!chunk.buffer && !make_chunk(std::max<std::uint64_t>(bytes, minimum), chunk)) return false;
+        if (!chunk.buffer) {
+            try {
+                if (!make_chunk(std::max<std::uint64_t>(bytes, minimum), chunk)) return false;
+            } catch (const std::bad_alloc&) {
+                return false;
+            }
+        }
         chunk.used = bytes;
+        current_.chunks.push_back(chunk);  // capacity was reserved above
         buffer = chunk.buffer;
         offset = 0;
-        current_.chunks.push_back(chunk);
         return true;
     }
 
     // The chunks handed out since the last call belong to a submission that `timeline` reaches `ticket` for
     // (ticket 0: nothing was submitted, they are free once `collect` runs).
-    void retire(VkSemaphore timeline, std::uint64_t ticket) {
+    void retire(VkSemaphore timeline, std::uint64_t ticket) noexcept {
         if (current_.chunks.empty()) return;
         current_.timeline = timeline;
         current_.ticket = ticket;
@@ -105,8 +129,10 @@ public:
             }
             for (auto& chunk : retired_[i].chunks) {
                 chunk.used = 0;
-                if (spare_.size() < 4) spare_.push_back(chunk);
-                else destroy(chunk);
+                if (spare_count_ < spare_.size()) {
+                    spare_[spare_count_++] = chunk;
+                    chunk = {};
+                } else destroy(chunk);
             }
             retired_[i].chunks.clear();
             retired_.erase(retired_.begin() + std::ptrdiff_t(i));
@@ -114,6 +140,14 @@ public:
     }
 
 private:
+    template<class T>
+    static void reserve_one(std::vector<T>& entries) {
+        if (entries.size() < entries.capacity()) return;
+        if (entries.size() == entries.max_size()) throw std::length_error("scratch batch capacity exhausted");
+        const auto extra = std::max<std::size_t>(1, entries.size() / 2);
+        entries.reserve(entries.size() + std::min(extra, entries.max_size() - entries.size()));
+    }
+
     struct Chunk {
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -152,7 +186,12 @@ private:
         if (vk_.vkCreateBuffer(device_, &info, nullptr, &out.buffer) != VK_SUCCESS) return false;
         VkMemoryRequirements requirements{};
         vk_.vkGetBufferMemoryRequirements(device_, out.buffer, &requirements);
-        out.memory = allocate_ ? allocate_(requirements) : VK_NULL_HANDLE;
+        try {
+            out.memory = allocate_ ? allocate_(requirements) : VK_NULL_HANDLE;
+        } catch (...) {
+            destroy(out);
+            throw;
+        }
         if (!out.memory || vk_.vkBindBufferMemory(device_, out.buffer, out.memory, 0) != VK_SUCCESS) {
             destroy(out);
             return false;
@@ -176,7 +215,8 @@ private:
     bool loaded_ = false;
     Batch current_;               // handed out, not yet submitted
     std::vector<Batch> retired_;  // submitted, waiting for the GPU
-    std::vector<Chunk> spare_;    // finished chunks kept for reuse
+    std::array<Chunk, 4> spare_{};  // finished chunks kept for reuse, no allocations in collect()
+    std::size_t spare_count_ = 0;
 };
 
 }  // namespace leonida

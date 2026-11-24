@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <limits>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -16,6 +19,24 @@
 } while (0)
 
 using leonida::ScratchBuffers;
+
+// Arm only around bookkeeping operations. The fake Vulkan calls are not reached
+// when preflight fails, and retirement/collection must not allocate.
+static thread_local int allocations_before_failure = -1;
+void* operator new(std::size_t size) {
+    if (allocations_before_failure == 0) {
+        allocations_before_failure = -1;
+        throw std::bad_alloc();
+    }
+    if (allocations_before_failure > 0) --allocations_before_failure;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -43,6 +64,7 @@ struct FakeVulkan {
     VkResult counter_result = VK_SUCCESS;
     bool counter_write_on_error = false;
     bool return_null_memory = false;
+    bool throw_on_allocate = false;
     const char* omit_proc = nullptr;
 };
 
@@ -117,15 +139,100 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL fake_get_device_proc(VkDevice, const ch
 
 VkDeviceMemory fake_allocate(const VkMemoryRequirements&) {
     ++g_vk->allocate_calls;
+    if (g_vk->throw_on_allocate) throw std::bad_alloc();
     if (g_vk->return_null_memory) return VK_NULL_HANDLE;
     const std::uintptr_t id = g_vk->next_memory++;
     g_vk->live_memory.insert(id);
     return make_handle<VkDeviceMemory>(id);
 }
 
+int test_preflight_allocation_failure() {
+    for (int failure = 0; failure < 2; ++failure) {
+        FakeVulkan vk;
+        g_vk = &vk;
+        {
+            ScratchBuffers scratch(fake_get_device_proc, k_device, fake_allocate);
+            VkBuffer buffer = VK_NULL_HANDLE;
+            VkDeviceSize offset = 777;
+            bool failed_cleanly = false;
+            allocations_before_failure = failure;
+            try { failed_cleanly = !scratch.get(1, buffer, offset); }
+            catch (const std::bad_alloc&) {}
+            allocations_before_failure = -1;
+            EXPECT(failed_cleanly && buffer == VK_NULL_HANDLE && offset == 777);
+            EXPECT(vk.create_buffer_calls == 0 && vk.live_buffers.empty() && vk.live_memory.empty());
+            EXPECT(scratch.get(1, buffer, offset) && buffer != VK_NULL_HANDLE && offset == 0);
+        }
+        EXPECT(vk.live_buffers.empty() && vk.live_memory.empty());
+    }
+    return 0;
+}
+
+int test_retirement_and_collection_without_allocation() {
+    FakeVulkan vk;
+    g_vk = &vk;
+    {
+        ScratchBuffers scratch(fake_get_device_proc, k_device, fake_allocate);
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+        constexpr VkDeviceSize chunk_size = 4u << 20;
+        for (int i = 0; i < 5; ++i) EXPECT(scratch.get(chunk_size, buffer, offset));
+
+        allocations_before_failure = 0;
+        bool retired = false;
+        try { scratch.retire(VK_NULL_HANDLE, 0); retired = allocations_before_failure == 0; }
+        catch (const std::bad_alloc&) {}
+        allocations_before_failure = -1;
+        EXPECT(retired);
+
+        allocations_before_failure = 0;
+        bool collected = false;
+        try { scratch.collect(); collected = allocations_before_failure == 0; }
+        catch (const std::bad_alloc&) {}
+        allocations_before_failure = -1;
+        EXPECT(collected);
+        EXPECT(vk.live_buffers.size() == 4 && vk.live_memory.size() == 4);
+        EXPECT(vk.destroy_buffer_calls == 1 && vk.free_memory_calls == 1);
+    }
+    EXPECT(vk.live_buffers.empty() && vk.live_memory.empty());
+    EXPECT(vk.destroy_buffer_calls == 5 && vk.free_memory_calls == 5);
+    return 0;
+}
+
+int test_allocator_exception_and_alignment_overflow() {
+    FakeVulkan vk;
+    g_vk = &vk;
+    {
+        ScratchBuffers scratch(fake_get_device_proc, k_device, fake_allocate);
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 777;
+        vk.throw_on_allocate = true;
+        bool failed_cleanly = false;
+        try { failed_cleanly = !scratch.get(1, buffer, offset); }
+        catch (const std::bad_alloc&) {}
+        vk.throw_on_allocate = false;
+        EXPECT(failed_cleanly && buffer == VK_NULL_HANDLE && offset == 777);
+        EXPECT(vk.live_buffers.empty() && vk.live_memory.empty());
+        EXPECT(vk.create_buffer_calls == 1 && vk.destroy_buffer_calls == 1);
+
+        // Fake Vulkan does not really allocate this size. The next aligned offset
+        // would wrap to zero with the previous addition, reusing live storage.
+        EXPECT(scratch.get(std::numeric_limits<VkDeviceSize>::max() - 4, buffer, offset));
+        const VkBuffer first = buffer;
+        EXPECT(scratch.get(16, buffer, offset) && buffer != first && offset == 0);
+    }
+    EXPECT(vk.live_buffers.empty() && vk.live_memory.empty());
+    EXPECT(vk.create_buffer_calls == vk.destroy_buffer_calls);
+    return 0;
+}
+
 }  // namespace
 
 int main() {
+    EXPECT(test_preflight_allocation_failure() == 0);
+    EXPECT(test_retirement_and_collection_without_allocation() == 0);
+    EXPECT(test_allocator_exception_and_alignment_overflow() == 0);
+
     // Missing any required proc leaves loaded() false, refuses get(), and skips vkDeviceWaitIdle in ~ScratchBuffers().
     for (const char* missing : {"vkCreateBuffer", "vkGetSemaphoreCounterValue", "vkDeviceWaitIdle"}) {
         FakeVulkan vk;
