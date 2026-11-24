@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cctype>
 #include <cstdlib>
 
 namespace leonida {
@@ -60,7 +61,14 @@ struct ArenaSize {
 //     invalid Vulkan, while one under 16 MiB is only small (and no conformant device reports under 1 GiB).
 inline ArenaSize decide_arena_size(const char* env, const ArenaLimits& limits, VkDeviceSize allocation_overhead = 0) {
     VkDeviceSize megabytes = kArenaDefaultMiB;
-    if (env && *env) megabytes = std::clamp<VkDeviceSize>(std::strtoull(env, nullptr, 10), kArenaMinMiB, kArenaMaxMiB);
+    if (env && *env) {
+        const char* start = env;
+        while (std::isspace(static_cast<unsigned char>(*start))) ++start;
+        // strtoull accepts a minus sign and wraps it into an unsigned value.
+        // A negative request belongs at the lower bound, not the near-4 GiB upper bound.
+        const VkDeviceSize requested = *start == '-' ? 0 : std::strtoull(start, nullptr, 10);
+        megabytes = std::clamp<VkDeviceSize>(requested, kArenaMinMiB, kArenaMaxMiB);
+    }
     ArenaSize size;
     size.requested = size.bytes = megabytes * kArenaMiB;
     VkDeviceSize by_buffer = size.requested, by_allocation = size.requested;
