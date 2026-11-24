@@ -20,6 +20,13 @@ inline std::vector<std::uint32_t> read_spirv_words(std::istream& input, std::str
     std::vector<std::uint32_t> words(static_cast<std::size_t>(byte_count / word_bytes));
     words.front() = magic;
     if (!input.read(reinterpret_cast<char*>(words.data() + 1), byte_count - word_bytes)) return {};
+    // Validate instruction boundaries before the module reaches feature scans or the driver.
+    // This is framing only, not a substitute for spirv-val.
+    for (std::size_t at = 5; at < words.size();) {
+        const std::size_t count = words[at] >> 16;
+        if (!count || count > words.size() - at) return {};
+        at += count;
+    }
     return words;
 }
 

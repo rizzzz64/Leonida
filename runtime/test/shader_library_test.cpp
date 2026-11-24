@@ -552,6 +552,22 @@ int main() {
         CHECK(read_spirv_words(input, static_cast<std::streamoff>(header_bytes.size() + 4)).empty());
     }
 
+    // Aligned files can still contain a zero-length or truncated instruction.
+    for (const auto& body : {std::vector<std::uint32_t>{0}, std::vector<std::uint32_t>{0x00030011, 1},
+                             std::vector<std::uint32_t>{0x00010000, 0}}) {
+        auto malformed = header;
+        malformed.insert(malformed.end(), body.begin(), body.end());
+        const std::string blob(reinterpret_cast<const char*>(malformed.data()), malformed.size() * 4);
+        std::istringstream input(blob);
+        CHECK(read_spirv_words(input, static_cast<std::streamoff>(blob.size())).empty());
+    }
+    {
+        auto framed = header;
+        framed.insert(framed.end(), {0x00020011, 1, 0x00010000});
+        const std::string blob(reinterpret_cast<const char*>(framed.data()), framed.size() * 4);
+        std::istringstream input(blob);
+        CHECK(read_spirv_words(input, static_cast<std::streamoff>(blob.size())) == framed);
+    }
     CHECK(sha256_hex({}) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     CHECK(sha256_hex(bytes("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     CHECK(sha256_hex(bytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
