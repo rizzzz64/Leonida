@@ -14,6 +14,7 @@
 #include <array>
 #include <bit>
 #include <cerrno>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -1023,10 +1024,10 @@ private:
             if (const Json* fh = meta.find("f16_halves"); fh && fh->kind == Json::Kind::object) {
                 for (const auto& [key, val] : fh->object) {
                     if (key.empty() || val.kind != Json::Kind::array || val.array.size() != 2) continue;
-                    char* end = nullptr;
-                    const unsigned long param = std::strtoul(key.c_str(), &end, 10);
-                    if (!end || *end != '\0') continue;
-                    e.f16_halves[std::uint32_t(param)] = {u32(&val.array[0]), u32(&val.array[1])};
+                    std::uint32_t param = 0;
+                    const auto [end, ec] = std::from_chars(key.data(), key.data() + key.size(), param);
+                    if (ec != std::errc{} || end != key.data() + key.size()) continue;
+                    e.f16_halves[param] = {u32(&val.array[0]), u32(&val.array[1])};
                 }
             }
             if (const Json* l = meta.find("literal_samplers"); l && l->kind == Json::Kind::array) {
