@@ -124,6 +124,21 @@ int test_min_switch_time() {
     return 0;
 }
 
+int test_out_of_order_timestamps() {
+    ActiveInputTracker t;
+    t.observe(xbox, InputFamily::Xbox, rest(), 0);
+    t.observe(dualsense, InputFamily::PlayStation5, rest(), 0);
+    EXPECT(t.observe(dualsense, InputFamily::PlayStation5, button(1), 1000 * ms) == InputEdge::Button);
+    EXPECT(t.observe(xbox, InputFamily::Xbox, button(1), 999 * ms) == InputEdge::None);
+    EXPECT(t.active() == InputFamily::PlayStation5 && t.generation() == 1);
+    // Stale edge is consumed, never replayed after the window.
+    EXPECT(t.observe(xbox, InputFamily::Xbox, button(1), 1300 * ms) == InputEdge::None);
+    t.observe(xbox, InputFamily::Xbox, rest(), 1301 * ms);
+    EXPECT(t.observe(xbox, InputFamily::Xbox, button(1), 1302 * ms) == InputEdge::Button);
+    EXPECT(t.active() == InputFamily::Xbox && t.generation() == 2);
+    return 0;
+}
+
 int test_same_family_and_holds() {
     ActiveInputTracker t;
     for (std::uint64_t d : {xbox, xbox2}) t.observe(d, InputFamily::Xbox, rest(), 0);
@@ -219,6 +234,7 @@ int main() {
         {"start and baseline", test_start_and_baseline},
         {"drift and thresholds", test_drift_and_thresholds},
         {"minimum time between changes", test_min_switch_time},
+        {"out-of-order timestamps", test_out_of_order_timestamps},
         {"one family, held input", test_same_family_and_holds},
         {"reconnect", test_reconnect},
         {"forced family", test_forced},
