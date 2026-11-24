@@ -248,9 +248,9 @@ private:
     // All eight slots for the incoming key are occupied. Try moving one resident
     // to the first empty slot beyond that window, within its own eight probes.
     // A later hole is farther from every resident, so failure here is final for a single move.
-    // `moved_to` receives the hole the resident moved into, so the caller can mark that slot changed too.
-    static int make_probe_slot(std::vector<DescriptorEntry>& entries, std::uint32_t hash,
-                               std::uint32_t* moved_to = nullptr) {
+    // Plan the relocation without touching live slots: change tracking can allocate and must succeed first.
+    struct ProbeMove { int slot = -1; std::uint32_t hole = 0; };
+    static ProbeMove find_probe_move(const std::vector<DescriptorEntry>& entries, std::uint32_t hash) {
         const auto mask = static_cast<std::uint32_t>(entries.size() - 1);
         for (auto offset = kDescriptorProbes; offset < 2 * kDescriptorProbes - 1; ++offset) {
             const auto hole = (hash + offset) & mask;
@@ -258,69 +258,87 @@ private:
             for (auto k = kDescriptorProbes; k > 0; --k) {
                 const auto slot = (hash + k - 1) & mask;
                 const auto home = hash_descriptor_key(entries[slot].key);
-                if (((hole - home) & mask) < kDescriptorProbes) {
-                    entries[hole] = entries[slot];
-                    if (moved_to) *moved_to = hole;
-                    return static_cast<int>(slot); // caller immediately overwrites the resident
-                }
+                if (((hole - home) & mask) < kDescriptorProbes)
+                    return {static_cast<int>(slot), hole};
             }
             break;
         }
-        return -1;
+        return {};
+    }
+
+    // Used only on a private candidate table; no GPU change tracking is needed there.
+    static bool place_entry(std::vector<DescriptorEntry>& entries, const DescriptorEntry& entry) {
+        const auto mask = static_cast<std::uint32_t>(entries.size() - 1);
+        const auto h = hash_descriptor_key(entry.key);
+        for (std::uint32_t k = 0; k < kDescriptorProbes; ++k) {
+            auto& slot = entries[(h + k) & mask];
+            if (slot.pad != kSlotOccupiedMarker) {
+                slot = entry;
+                return true;
+            }
+        }
+        const auto move = find_probe_move(entries, h);
+        if (move.slot < 0) return false;
+        entries[move.hole] = entries[move.slot];
+        entries[move.slot] = entry;
+        return true;
     }
 
     InsertResult insert_locked(const std::uint32_t key[8], std::uint32_t index) {
-        while (true) {
-            const std::uint32_t h = hash_descriptor_key(key);
-            int empty_slot = -1;
+        const std::uint32_t h = hash_descriptor_key(key);
+        int empty_slot = -1;
+        std::uint32_t same_hash = 0;
 
-            for (std::uint32_t k = 0; k < kDescriptorProbes; ++k) {
-                const std::uint32_t slot = (h + k) & mask_;
-                auto& entry = entries_[slot];
-                if (entry.pad == kSlotOccupiedMarker) {
-                    if (std::memcmp(entry.key, key, sizeof(entry.key)) == 0) {
-                        if (entry.index == index) return InsertResult::unchanged;
-                        entry.index = index;
-                        mark(slot);
-                        return InsertResult::replaced;
-                    }
-                } else if (empty_slot < 0) {
-                    empty_slot = static_cast<int>(slot);
+        for (std::uint32_t k = 0; k < kDescriptorProbes; ++k) {
+            const std::uint32_t slot = (h + k) & mask_;
+            auto& entry = entries_[slot];
+            if (entry.pad == kSlotOccupiedMarker) {
+                if (std::memcmp(entry.key, key, sizeof(entry.key)) == 0) {
+                    if (entry.index == index) return InsertResult::unchanged;
+                    mark(slot);  // may allocate: leave the live mapping unchanged if it fails
+                    entry.index = index;
+                    return InsertResult::replaced;
                 }
+                if (hash_descriptor_key(entry.key) == h) ++same_hash;
+            } else if (empty_slot < 0) {
+                empty_slot = static_cast<int>(slot);
             }
-
-            if ((occupied_count_ + 1) * 2 > entries_.size()) {
-                grow_locked();
-                continue;
-            }
-
-            // Nine distinct keys with the same full hash can never fit the shader's eight probes,
-            // regardless of capacity. Refuse before allocating ever larger tables.
-            if (empty_slot < 0) {
-                std::uint32_t same_hash = 0;
-                for (std::uint32_t k = 0; k < kDescriptorProbes; ++k) {
-                    const auto& entry = entries_[(h + k) & mask_];
-                    if (hash_descriptor_key(entry.key) == h) ++same_hash;
-                }
-                if (same_hash == kDescriptorProbes)
-                    throw std::length_error("Descriptor hash collision exceeds shader probe limit");
-            }
-            const bool relocate = empty_slot < 0;
-            std::uint32_t moved_to = 0;
-            if (relocate) empty_slot = make_probe_slot(entries_, h, &moved_to);
-            if (empty_slot >= 0) {
-                auto& entry = entries_[empty_slot];
-                std::memcpy(entry.key, key, sizeof(entry.key));
-                entry.index = index;
-                entry.pad = kSlotOccupiedMarker;
-                ++occupied_count_;
-                if (relocate) mark(moved_to);
-                mark(std::uint32_t(empty_slot));
-                return relocate ? InsertResult::added_with_relocation : InsertResult::added;
-            }
-
-            grow_locked();
         }
+
+        // Even at the load-factor limit, refuse an impossible ninth full-hash collision before growing.
+        if (same_hash == kDescriptorProbes)
+            throw std::length_error("Descriptor hash collision exceeds shader probe limit");
+
+        DescriptorEntry incoming{};
+        std::memcpy(incoming.key, key, sizeof(incoming.key));
+        incoming.index = index;
+        incoming.pad = kSlotOccupiedMarker;
+        if ((occupied_count_ + 1) * 2 <= entries_.size()) {
+            if (empty_slot >= 0) {
+                mark(static_cast<std::uint32_t>(empty_slot));
+                entries_[empty_slot] = incoming;
+                ++occupied_count_;
+                return InsertResult::added;
+            }
+
+            const auto move = find_probe_move(entries_, h);
+            if (move.slot >= 0) {
+                // Reserve both dirty records as one operation before moving either live slot.
+                const auto first = changed_slots_.size();
+                if (changed_slots_.max_size() - first < 2)
+                    throw std::length_error("Descriptor change list exhausted");
+                changed_slots_.resize(first + 2);
+                changed_slots_[first] = move.hole;
+                changed_slots_[first + 1] = static_cast<std::uint32_t>(move.slot);
+                entries_[move.hole] = entries_[move.slot];
+                entries_[move.slot] = incoming;
+                ++occupied_count_;
+                return InsertResult::added_with_relocation;
+            }
+        }
+
+        grow_locked(incoming);
+        return InsertResult::added;
     }
 
     bool erase_locked(const std::uint32_t key[8]) {
@@ -339,45 +357,35 @@ private:
         if (!found) return false;
 
         // No backward shift: see erase().
+        mark(found_slot);  // a failed allocation must not erase the CPU entry
         entries_[found_slot] = DescriptorEntry{};
-        mark(found_slot);
         --occupied_count_;
         return true;
     }
 
-    void grow_locked() {
+    // Rehash the old entries AND the pending insert into a private table. Publishing a successful
+    // intermediate growth before the incoming key fits would leave the GPU mask stale if a later
+    // allocation failed: BindlessSet marks the table dirty only when insert_or_update returns.
+    void grow_locked(const DescriptorEntry& incoming) {
         if (entries_.size() >= max_capacity) throw std::length_error("Descriptor table capacity exhausted");
         std::uint32_t new_cap = static_cast<std::uint32_t>(entries_.size() * 2);
         while (true) {
             std::vector<DescriptorEntry> new_entries(new_cap);
-            const std::uint32_t new_mask = new_cap - 1;
             bool rehash_ok = true;
-
             for (const auto& old : entries_) {
                 if (old.pad != kSlotOccupiedMarker) continue;
-                const std::uint32_t h = hash_descriptor_key(old.key);
-                int slot = -1;
-                for (std::uint32_t k = 0; k < kDescriptorProbes; ++k) {
-                    const std::uint32_t s = (h + k) & new_mask;
-                    if (new_entries[s].pad != kSlotOccupiedMarker) {
-                        slot = static_cast<int>(s);
-                        break;
-                    }
-                }
-                if (slot < 0) slot = make_probe_slot(new_entries, h);
-                if (slot < 0) {
+                if (!place_entry(new_entries, old)) {
                     rehash_ok = false;
                     break;
                 }
-                new_entries[slot] = old;
             }
-
-            if (rehash_ok) {
+            if (rehash_ok && place_entry(new_entries, incoming)) {
                 entries_ = std::move(new_entries);
-                mask_ = new_mask;
+                mask_ = new_cap - 1;
+                ++occupied_count_;
                 all_changed_ = true;
                 changed_slots_.clear();
-                break;
+                return;
             }
             if (new_cap >= max_capacity) throw std::length_error("Descriptor probe range exhausted");
             new_cap *= 2;

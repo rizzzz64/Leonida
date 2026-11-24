@@ -6,6 +6,8 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <new>
 #include <random>
 #include <thread>
 #include <vector>
@@ -18,6 +20,23 @@
 } while (0)
 
 using namespace leonida;
+
+// Failure injection is local to the test thread and armed only around the table operation.
+static thread_local int allocations_before_failure = -1;
+void* operator new(std::size_t size) {
+    if (allocations_before_failure == 0) {
+        allocations_before_failure = -1;
+        throw std::bad_alloc();
+    }
+    if (allocations_before_failure > 0) --allocations_before_failure;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 int test_fnv1a_hash_matches_contract() {
     // Verified against vk_texture_test.cpp key_hash and rdna2spirv.py desc_probe
@@ -448,7 +467,101 @@ int test_capacity_overflow() {
     return 0;
 }
 
+// Compare the entire serialized table and the dirty state, not just the key being modified.
+template<class Operation>
+int expect_failed_mutation(DescriptorTable& table, int fail_after, Operation operation) {
+    table.take_changes();
+    const auto before = table.build_gpu_buffer();
+    const auto size = table.size();
+    const auto capacity = table.capacity();
+    bool threw = false;
+    allocations_before_failure = fail_after;
+    try { operation(); }
+    catch (const std::bad_alloc&) { threw = true; }
+    catch (...) { allocations_before_failure = -1; throw; }
+    allocations_before_failure = -1;
+    EXPECT(threw);
+    EXPECT(table.size() == size && table.capacity() == capacity);
+    EXPECT(table.build_gpu_buffer() == before);
+    const auto changes = table.take_changes();
+    EXPECT(!changes.all && changes.slots.empty());
+    return 0;
+}
+
+int test_mutations_are_atomic_on_allocation_failure() {
+    const DescriptorKey first{1, 2, 3, 4, 5, 6, 7, 8};
+    const DescriptorKey second{9, 10, 11, 12, 13, 14, 15, 16};
+    DescriptorTable table(32);
+    EXPECT(table.insert(first, 11));
+
+    EXPECT(expect_failed_mutation(table, 0, [&] { table.insert(second, 22); }) == 0);
+    EXPECT(!table.contains(second));
+    EXPECT(table.insert(second, 22) && table.lookup(second) == 22);
+    EXPECT(table.take_changes().slots.size() == 1);
+
+    EXPECT(expect_failed_mutation(table, 0, [&] { table.insert(first, 99); }) == 0);
+    EXPECT(table.lookup(first) == 11);
+    EXPECT(table.insert(first, 99) && table.lookup(first) == 99);
+    EXPECT(table.take_changes().slots.size() == 1);
+
+    EXPECT(expect_failed_mutation(table, 0, [&] { table.erase(first); }) == 0);
+    EXPECT(table.lookup(first) == 99);
+    EXPECT(table.erase(first) && !table.contains(first));
+    EXPECT(table.take_changes().slots.size() == 1);
+    return 0;
+}
+
+int test_relocation_is_atomic_on_allocation_failure() {
+    DescriptorTable table(64);
+    std::array<DescriptorKey, kDescriptorProbes + 1> keys{};
+    for (std::uint32_t i = 0; i < keys.size(); ++i) {
+        auto& key = keys[i];
+        key[0] = i + 1;
+        const auto target = (60 + i % kDescriptorProbes) & 63;
+        while ((hash_descriptor_key(key) & 63) != target) ++key[7];
+    }
+    for (std::uint32_t i = 0; i < kDescriptorProbes; ++i)
+        EXPECT(table.insert(keys[i], 100 + i));
+    EXPECT(expect_failed_mutation(table, 0, [&] { table.insert(keys.back(), 999); }) == 0);
+    EXPECT(!table.contains(keys.back()));
+    EXPECT(table.insert_or_update(keys.back().data(), 999) ==
+           DescriptorTable::InsertResult::added_with_relocation);
+    const auto changes = table.take_changes();
+    EXPECT(!changes.all && changes.slots.size() == 2);
+    for (std::uint32_t i = 0; i < kDescriptorProbes; ++i)
+        EXPECT(table.lookup(keys[i]) == 100 + i);
+    EXPECT(table.lookup(keys.back()) == 999);
+    return 0;
+}
+
+int test_growth_publishes_only_after_pending_key_fits() {
+    DescriptorTable table(16);
+    std::array<DescriptorKey, 9> keys{};
+    // All nine share a home modulo 32; the last separates only at capacity 64.
+    // A failed second allocation must leave the original 16-slot table unchanged.
+    for (std::uint32_t i = 0; i < keys.size(); ++i) {
+        auto& key = keys[i];
+        key[0] = i + 1;
+        const auto target = i == 8 ? 32u : 0u;
+        while ((hash_descriptor_key(key) & 63) != target) ++key[7];
+    }
+    for (std::uint32_t i = 0; i < 8; ++i) EXPECT(table.insert(keys[i], i + 1));
+    EXPECT(table.capacity() == 16);
+    for (int failure = 0; failure <= 1; ++failure) {
+        EXPECT(expect_failed_mutation(table, failure, [&] { table.insert(keys[8], 9); }) == 0);
+        EXPECT(!table.contains(keys[8]));
+    }
+    EXPECT(table.insert(keys[8], 9));
+    EXPECT(table.size() == 9 && table.capacity() == 64);
+    EXPECT(table.take_changes().all);
+    for (std::uint32_t i = 0; i < keys.size(); ++i) EXPECT(table.lookup(keys[i]) == i + 1);
+    return 0;
+}
+
 int main() {
+    EXPECT(test_mutations_are_atomic_on_allocation_failure() == 0);
+    EXPECT(test_relocation_is_atomic_on_allocation_failure() == 0);
+    EXPECT(test_growth_publishes_only_after_pending_key_fits() == 0);
     EXPECT(test_unresolvable_hash_collision() == 0);
     EXPECT(test_capacity_overflow() == 0);
     EXPECT(test_fnv1a_hash_matches_contract() == 0);
