@@ -265,6 +265,20 @@ inline bool link_f16_halves(std::vector<std::uint32_t>& vs_words, const ShaderEn
     const auto vs_outputs = collect_located_vars(vs_mod, kStorageOutput);
     const auto ps_inputs = collect_located_vars(ps_mod, kStorageInput);
 
+    // Index metadata is not proof that the module declares these half variables.
+    // Reject missing or repeated locations before the matching-metadata fast path.
+    const auto valid_halves = [](const auto& halves, const auto& vars) {
+        std::set<std::uint32_t> seen;
+        for (const auto& [param, pair] : halves)
+            for (auto loc : pair)
+                if (!vars.count(loc) || !seen.insert(loc).second) return false;
+        return true;
+    };
+    if (!valid_halves(vs_entry.f16_halves, vs_outputs))
+        return fail("f16_halves: missing or repeated VS half location");
+    if (!valid_halves(ps_entry.f16_halves, ps_inputs))
+        return fail("f16_halves: missing or repeated PS half location");
+
     std::set<std::uint32_t> vs_static_half_locs;
     for (const auto& [param, pair] : vs_entry.f16_halves) {
         vs_static_half_locs.insert(pair[0]);

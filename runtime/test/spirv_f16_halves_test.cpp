@@ -419,6 +419,25 @@ int main() {
         CHECK(vs_w == vs_orig && ps_w == ps_orig);
     }
 
+    // Matching metadata must not hide missing declarations or duplicate half locations.
+    {
+        ShaderEntry vs_e, ps_e;
+        vs_e.f16_halves = ps_e.f16_halves = {{0, {28, 29}}};
+        for (bool missing_vs : {false, true}) {
+            auto vs = build_vs(0x00010500u, 2, missing_vs ? decltype(vs_e.f16_halves){} : vs_e.f16_halves);
+            auto ps = build_ps(0x00010500u, {0, 1}, missing_vs ? ps_e.f16_halves : decltype(ps_e.f16_halves){});
+            const auto before_vs = vs, before_ps = ps;
+            std::string err;
+            CHECK(!link_f16_halves(vs, vs_e, ps, ps_e, &err));
+            CHECK(!err.empty() && vs == before_vs && ps == before_ps);
+        }
+        auto vs = build_vs(0x00010500u, 2, vs_e.f16_halves);
+        auto ps = build_ps(0x00010500u, {0, 1}, ps_e.f16_halves);
+        vs_e.f16_halves = ps_e.f16_halves = {{0, {28, 28}}};
+        const auto before_vs = vs, before_ps = ps;
+        CHECK(!link_f16_halves(vs, vs_e, ps, ps_e));
+        CHECK(vs == before_vs && ps == before_ps);
+    }
     std::printf("spirv_f16_halves_test: all checks passed\n");
     return 0;
 }
