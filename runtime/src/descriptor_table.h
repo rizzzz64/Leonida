@@ -287,7 +287,6 @@ private:
     InsertResult insert_locked(const std::uint32_t key[8], std::uint32_t index) {
         const std::uint32_t h = hash_descriptor_key(key);
         int empty_slot = -1;
-        std::uint32_t same_hash = 0;
 
         for (std::uint32_t k = 0; k < kDescriptorProbes; ++k) {
             const std::uint32_t slot = (h + k) & mask_;
@@ -299,15 +298,19 @@ private:
                     entry.index = index;
                     return InsertResult::replaced;
                 }
-                if (hash_descriptor_key(entry.key) == h) ++same_hash;
             } else if (empty_slot < 0) {
                 empty_slot = static_cast<int>(slot);
             }
         }
 
         // Even at the load-factor limit, refuse an impossible ninth full-hash collision before growing.
-        if (same_hash == kDescriptorProbes)
-            throw std::length_error("Descriptor hash collision exceeds shader probe limit");
+        if (empty_slot < 0) {
+            std::uint32_t same_hash = 0;
+            for (std::uint32_t k = 0; k < kDescriptorProbes; ++k)
+                if (hash_descriptor_key(entries_[(h + k) & mask_].key) == h) ++same_hash;
+            if (same_hash == kDescriptorProbes)
+                throw std::length_error("Descriptor hash collision exceeds shader probe limit");
+        }
 
         DescriptorEntry incoming{};
         std::memcpy(incoming.key, key, sizeof(incoming.key));
