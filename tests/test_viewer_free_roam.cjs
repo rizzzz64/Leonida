@@ -21,3 +21,13 @@ test('nearest candidate selection matches stable sort', () => {
         assert.deepEqual(got.map(x => x.def), rows.slice().sort((a,b) => a.distance-b.distance).slice(0,k).map(x=>x.def));
     }
 });
+
+test('walking camera uses normalized horizontal input independent of pitch', () => {
+    const direction = helper('function walkingDirection(', 'const WALK_SPEED', 'walkingDirection');
+    const close = (a,b) => assert(Math.abs(a-b)<1e-9);
+    for (const [keys,yaw,x,z] of [
+        [[],0,0,0], [['KeyW'],0,0,-1], [['KeyD'],0,1,0], [['KeyW'],Math.PI/2,-1,0],
+        [['KeyW','KeyD'],0,Math.SQRT1_2,-Math.SQRT1_2], [['KeyW','KeyS'],0,0,0]]) {
+        const d = direction(new Set(keys),yaw); close(d.x,x); close(d.z,z);
+    }
+});

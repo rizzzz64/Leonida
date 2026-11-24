@@ -32,6 +32,7 @@
 </div>
 <div id="help">
   <kbd>W A S D</kbd> move · <kbd>Q</kbd>/<kbd>E</kbd> down/up · <kbd>Shift</kbd> fast · <kbd>Ctrl</kbd> slow · wheel: speed<br>
+  <a href="?walk" style="color:var(--accent)">Experimental walk camera</a> · <a href="?" style="color:var(--accent)">Fly</a><br>
   <kbd>F</kbd> wireframe · <kbd>T</kbd> textures/clay · <kbd>G</kbd> chunk bounds · <kbd>R</kbd> back to spawn · <kbd>P</kbd> copy link to this view · <kbd>Esc</kbd> release mouse
 </div>
 <div id="start">Click to fly</div>
@@ -198,6 +199,16 @@ addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; cam
 
 // ---------- freecam ----------
 const keys = new Set(); let yaw = 0, pitch = -0.25, speed = 40, locked = false;
+// Walking is explicitly opt-in; the original inspection/fly mode remains the default.
+const walkMode = new URLSearchParams(location.search).has("walk");
+function walkingDirection(keys, yaw) {
+  const forward = Number(keys.has("KeyW")) - Number(keys.has("KeyS"));
+  const side = Number(keys.has("KeyD")) - Number(keys.has("KeyA"));
+  const norm = Math.hypot(forward, side) || 1;
+  return { x: (side * Math.cos(yaw) - forward * Math.sin(yaw)) / norm,
+           z: (-side * Math.sin(yaw) - forward * Math.cos(yaw)) / norm };
+}
+const WALK_SPEED = 4.2;
 // Pointer lock when the browser allows it; embedded views (iframes, preview panes) fall back to drag-to-look.
 const start = document.getElementById("start");
 let dragLook = false, dragging = false;
@@ -432,12 +443,18 @@ const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vec
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
+  if (walkMode) {
+    const d = walkingDirection(keys, yaw);
+    camera.position.x += d.x * WALK_SPEED * dt;
+    camera.position.z += d.z * WALK_SPEED * dt;
+  } else {
   camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
   const v = new THREE.Vector3(), s = speed * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 5 : 1) * (keys.has("ControlLeft") || keys.has("ControlRight") ? 0.2 : 1);
   if (keys.has("KeyW")) v.add(fwd); if (keys.has("KeyS")) v.sub(fwd);
   if (keys.has("KeyD")) v.add(right); if (keys.has("KeyA")) v.sub(right);
   if (keys.has("KeyE")) v.y += 1; if (keys.has("KeyQ")) v.y -= 1;
   if (v.lengthSq()) camera.position.addScaledVector(v.normalize(), s * dt);
+  }
   stream();
   renderer.render(scene, camera);
   fpsN++; fpsT += dt; if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
