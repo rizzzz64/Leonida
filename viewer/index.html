@@ -209,6 +209,40 @@ function walkingDirection(keys, yaw) {
            z: (-side * Math.sin(yaw) - forward * Math.cos(yaw)) / norm };
 }
 const WALK_SPEED = 4.2;
+const walkState = { vy: 0, grounded: false, waiting: false };
+
+// ---------- walk physics (pure) ----------
+const EYE_HEIGHT = 1.7, STEP_HEIGHT = 0.35, WALK_GRAVITY = 9.81, PHYSICS_STEP = 1 / 60;
+function stepWalker(p, state, dx, dz, dt, probe) {
+  const foot = p.y - EYE_HEIGHT;
+  let floor = probe.ground(p.x, p.z, foot + STEP_HEIGHT);
+  state.waiting = floor === null;
+  if (state.waiting) { state.vy = 0; state.grounded = false; return; }
+  // Sliding along a wall is a conservative axis-separated sweep, not a full capsule solver.
+  for (const [sx, sz] of [[dx, 0], [0, dz]]) {
+    if ((!sx && !sz) || probe.blocked(p.x, foot, p.z, sx, sz)) continue;
+    const next = probe.ground(p.x + sx, p.z + sz, foot + STEP_HEIGHT);
+    if (next === null || next > foot + STEP_HEIGHT) continue;
+    p.x += sx; p.z += sz; floor = next;
+  }
+  state.vy = Math.max(-55, state.vy - WALK_GRAVITY * dt);
+  const nextFoot = foot + state.vy * dt;
+  if (state.vy <= 0 && nextFoot <= floor) {
+    p.y = floor + EYE_HEIGHT; state.vy = 0; state.grounded = true;
+  } else {
+    p.y = nextFoot + EYE_HEIGHT; state.grounded = false;
+  }
+}
+function advanceWalker(p, state, direction, speed, dt, probe) {
+  let remaining = Math.min(Math.max(dt, 0), 0.1);
+  while (remaining > 1e-8) {
+    const step = Math.min(remaining, PHYSICS_STEP);
+    stepWalker(p, state, direction.x * speed * step, direction.z * speed * step, step, probe);
+    remaining -= step;
+  }
+}
+// ---------- end walk physics ----------
+
 // Pointer lock when the browser allows it; embedded views (iframes, preview panes) fall back to drag-to-look.
 const start = document.getElementById("start");
 let dragLook = false, dragging = false;
@@ -241,7 +275,10 @@ addEventListener("keydown", e => {
   if (e.code === "KeyF" && !e.repeat) wire = !wire, applyWire();
   if (e.code === "KeyT" && !e.repeat) clay = !clay, applyClay();
   if (e.code === "KeyG" && !e.repeat) toggleBounds();
-  if (e.code === "KeyR") camera.position.fromArray(world.spawn);
+  if (e.code === "KeyR") {
+    camera.position.fromArray(world.spawn);
+    Object.assign(walkState, { vy: 0, grounded: false, waiting: false });
+  }
   if (e.code === "KeyP" && !e.repeat) {
     history.replaceState(null, "", formatCamHash(camera.position.toArray(), yaw, pitch));
     navigator.clipboard?.writeText(location.href).catch(() => {});
@@ -429,6 +466,62 @@ function stream(now = performance.now()) {
   }
 }
 
+// ---------- walk collision adapter ----------
+let walkRay, walkOrigin, walkDirection, walkNormal, walkNormalMatrix, walkInstanceMatrix, walkWorldMatrix;
+function makeWalkProbe(p) {
+  // Only visible, loaded chunks near the walker participate. The raycast is a prototype
+  // against render geometry, not the original game's collision or navigation mesh.
+  const roots = [];
+  for (const c of live.values()) {
+    if (!c.obj || c.obj.visible === false) continue;
+    const b = c.def.bounds;
+    if (p.x < b[0] - 2 || p.x > b[3] + 2 || p.z < b[2] - 2 || p.z > b[5] + 2) continue;
+    roots.push(c.obj);
+  }
+  walkRay ||= new THREE.Raycaster();
+  walkOrigin ||= new THREE.Vector3();
+  walkDirection ||= new THREE.Vector3();
+  walkNormal ||= new THREE.Vector3();
+  walkNormalMatrix ||= new THREE.Matrix3();
+  walkInstanceMatrix ||= new THREE.Matrix4();
+  walkWorldMatrix ||= new THREE.Matrix4();
+  const visible = hit => {
+    for (let n = hit.object; n; n = n.parent) if (n.visible === false) return false;
+    return true;
+  };
+  function hits(x, y, z, dx, dy, dz, far) {
+    walkRay.set(walkOrigin.set(x, y, z), walkDirection.set(dx, dy, dz));
+    walkRay.far = far;
+    return walkRay.intersectObjects(roots, true);
+  }
+  function upward(hit) {
+    if (!hit.face) return false;
+    let matrix = hit.object.matrixWorld;
+    if (hit.object.isInstancedMesh && hit.instanceId !== undefined) {
+      hit.object.getMatrixAt(hit.instanceId, walkInstanceMatrix);
+      matrix = walkWorldMatrix.multiplyMatrices(matrix, walkInstanceMatrix);
+    }
+    walkNormalMatrix.getNormalMatrix(matrix);
+    return walkNormal.copy(hit.face.normal).applyNormalMatrix(walkNormalMatrix).y >= 0.55;
+  }
+  return {
+    ground(x, z, fromY) {
+      for (const hit of hits(x, fromY, z, 0, -1, 0, 1000))
+        if (visible(hit) && upward(hit)) return hit.point.y;
+      return null;
+    },
+    blocked(x, foot, z, dx, dz) {
+      const length = Math.hypot(dx, dz);
+      if (!length) return false;
+      const vx = dx / length, vz = dz / length, radius = 0.28;
+      for (const side of [-radius, 0, radius])
+        for (const height of [STEP_HEIGHT + 0.08, EYE_HEIGHT - 0.1])
+          if (hits(x - vz * side, foot + height, z + vx * side, vx, 0, vz, length + radius)
+                .some(hit => visible(hit))) return true;
+      return false;
+    },
+  };
+}
 // ---------- main loop ----------
 camera.position.fromArray(world.spawn);
 const startCam = parseCamHash(location.hash);
@@ -445,8 +538,7 @@ renderer.setAnimationLoop(() => {
   camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
   if (walkMode) {
     const d = walkingDirection(keys, yaw);
-    camera.position.x += d.x * WALK_SPEED * dt;
-    camera.position.z += d.z * WALK_SPEED * dt;
+    advanceWalker(camera.position, walkState, d, WALK_SPEED, dt, makeWalkProbe(camera.position));
   } else {
   camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
   const v = new THREE.Vector3(), s = speed * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 5 : 1) * (keys.has("ControlLeft") || keys.has("ControlRight") ? 0.2 : 1);

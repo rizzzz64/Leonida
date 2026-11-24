@@ -31,3 +31,17 @@ test('walking camera uses normalized horizontal input independent of pitch', () 
         const d = direction(new Set(keys),yaw); close(d.x,x); close(d.z,z);
     }
 });
+
+test('gravity lands on floor, blocks walls and waits for missing geometry', () => {
+    const { advanceWalker } = helper('// ---------- walk physics (pure) ----------', '// ---------- end walk physics ----------', '{ advanceWalker }');
+    const p = {x:0,y:12,z:0}, state = {vy:0,grounded:false,waiting:false};
+    const floor = {ground:()=>0,blocked:()=>false};
+    for(let i=0;i<100;i++) advanceWalker(p,state,{x:0,z:0},4.2,0.05,floor);
+    assert.equal(p.y,1.7); assert.equal(state.vy,0); assert(state.grounded);
+    advanceWalker(p,state,{x:1,z:0},4.2,0.1,{...floor,blocked:()=>true});
+    assert.equal(p.x,0);
+    advanceWalker(p,state,{x:1,z:0},4.2,0.1,{ground:()=>null,blocked:()=>false});
+    assert.equal(p.y,1.7); assert.equal(p.x,0); assert(state.waiting);
+    advanceWalker(p,state,{x:1,z:0},4.2,0.1,floor);
+    assert(Math.abs(p.x-0.42)<1e-9); assert(!state.waiting);
+});
