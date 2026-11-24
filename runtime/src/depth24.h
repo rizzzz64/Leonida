@@ -73,4 +73,22 @@ struct Depth24Job {
     std::uint32_t scratch_base_words = 0;  // and the scratch's
 };
 
+// Validate byte arithmetic before allocating scratch or building descriptor windows.
+inline bool depth24_copy_sizes(const Depth24Job& whole, std::uint64_t& scratch_bytes) {
+    const std::uint64_t aw = std::uint64_t(whole.width) * whole.app_texel_words();
+    const std::uint64_t sw = std::uint64_t(whole.width) * whole.scratch_texel_words();
+    if (!whole.width || !whole.height || !whole.slices || whole.app_offset % 4 ||
+        whole.app_row_words < aw ||
+        whole.app_slice_words < std::uint64_t(whole.app_row_words) * (whole.height - 1) + aw)
+        return false;
+    const std::uint64_t h = whole.height, s = whole.slices;
+    // The validated row extent is at most one slice stride, so this sum fits uint64_t.
+    const std::uint64_t span_words = (s - 1) * whole.app_slice_words + (h - 1) * whole.app_row_words + aw;
+    if (whole.app_offset > whole.app_size || span_words > (whole.app_size - whole.app_offset) / 4)
+        return false;
+    if (sw > UINT64_MAX / 4 / h / s) return false;
+    scratch_bytes = sw * h * s * 4;
+    return whole.scratch_offset <= UINT64_MAX - scratch_bytes;
+}
+
 }  // namespace leonida

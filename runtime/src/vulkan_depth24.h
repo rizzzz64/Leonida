@@ -61,29 +61,28 @@ public:
         // D24, three and four for 96-bit texels).
         const std::uint64_t aw = std::uint64_t(whole.width) * whole.app_texel_words();
         const std::uint64_t sw = std::uint64_t(whole.width) * whole.scratch_texel_words();
-        if (!loaded_ || !make_pipeline() || !whole.app || !whole.width || !whole.height || !whole.slices ||
-            whole.app_offset % 4 || whole.app_row_words < aw ||
-            whole.app_slice_words < std::uint64_t(whole.app_row_words) * (whole.height - 1) + aw)
-            return false;
+        std::uint64_t scratch_size = 0;
+        if (!loaded_ || !whole.app || !depth24_copy_sizes(whole, scratch_size) || !make_pipeline()) return false;
         const std::uint64_t h = whole.height, s = whole.slices;
-        const std::uint64_t span_words = (s - 1) * whole.app_slice_words + (h - 1) * whole.app_row_words + aw;
-        if (whole.app_offset + span_words * 4 > whole.app_size) return false;
-        if (!whole.scratch && !scratch(sw * h * s * 4, whole.scratch, whole.scratch_offset)) return false;
+        if (!whole.scratch && !scratch(scratch_size, whole.scratch, whole.scratch_offset)) return false;
+        if (whole.scratch_offset > UINT64_MAX - scratch_size) return false;
 
         // A window starts at a multiple of 256 (the largest minStorageBufferOffsetAlignment), which costs up to 252 bytes.
         constexpr std::uint64_t slack = 256;
         const std::uint64_t limit = max_range_;
-        const auto app_bytes = [&](std::uint64_t slices, std::uint64_t rows) {
-            return ((slices - 1) * whole.app_slice_words + (rows - 1) * whole.app_row_words + aw) * 4 + slack;
+        if (limit <= slack) return false;
+        const std::uint64_t word_limit = (limit - slack) / 4;
+        const auto fits = [&](std::uint64_t slices, std::uint64_t rows) {
+            return (slices - 1) * whole.app_slice_words + (rows - 1) * whole.app_row_words + aw <= word_limit &&
+                   slices * rows * sw <= word_limit;
         };
-        const auto scratch_bytes = [&](std::uint64_t slices, std::uint64_t rows) { return slices * rows * sw * 4 + slack; };
         std::uint64_t slices_per_part = 0;  // 0: a slice alone is too big
-        while (slices_per_part < s && app_bytes(slices_per_part + 1, h) <= limit && scratch_bytes(slices_per_part + 1, h) <= limit)
+        while (slices_per_part < s && fits(slices_per_part + 1, h))
             ++slices_per_part;
         std::uint64_t rows_per_part = h;
         if (!slices_per_part) {
             rows_per_part = 0;
-            while (rows_per_part < h && app_bytes(1, rows_per_part + 1) <= limit && scratch_bytes(1, rows_per_part + 1) <= limit)
+            while (rows_per_part < h && fits(1, rows_per_part + 1))
                 ++rows_per_part;
             if (!rows_per_part) return false;
         }
@@ -116,7 +115,7 @@ public:
         vk_.vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &job.set, 0,
                                     nullptr);
         vk_.vkCmdPushConstants(command_buffer, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vk_.vkCmdDispatch(command_buffer, (job.width + 7) / 8, (job.height + 7) / 8, job.slices);
+        vk_.vkCmdDispatch(command_buffer, (job.width - 1) / 8 + 1, (job.height - 1) / 8 + 1, job.slices);
     }
 
     // The jobs prepared since the last call belong to a submission that `timeline` reaches `ticket` for.

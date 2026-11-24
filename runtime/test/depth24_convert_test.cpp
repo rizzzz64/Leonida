@@ -65,6 +65,25 @@ VKAPI_ATTR void VKAPI_CALL observe_host(VkCommandBuffer cb, const VkDependencyIn
 }  // namespace
 
 int main() {
+    // Arithmetic regressions run before GPU initialization, with no driver allocations.
+    {
+        std::uint64_t bytes = 0;
+        Depth24Job j{};
+        j.width = j.height = j.slices = j.app_row_words = j.app_slice_words = 1;
+        j.app_offset = UINT64_MAX - 3;
+        j.app_size = 32;
+        EXPECT(!depth24_copy_sizes(j, bytes));
+        j.app_offset = 0; j.app_size = UINT64_MAX;
+        j.slices = j.app_slice_words = UINT32_MAX;
+        EXPECT(!depth24_copy_sizes(j, bytes));
+        j.rgb96 = true; j.app_row_words = j.app_slice_words = 3;
+        EXPECT(depth24_copy_sizes(j, bytes) && bytes == std::uint64_t(UINT32_MAX) * 16);
+        j = {}; j.width = j.height = j.slices = j.app_row_words = j.app_slice_words = 1;
+        j.app_size = 16; j.scratch_offset = UINT64_MAX - 3;
+        EXPECT(!depth24_copy_sizes(j, bytes));
+        j.scratch_offset = 0; j.width = j.height = j.app_row_words = 2; j.app_slice_words = 4;
+        EXPECT(depth24_copy_sizes(j, bytes) && bytes == 16);
+    }
     vktest::Device gpu;
     const auto status = gpu.initialize();
     if (status == vktest::DeviceStatus::unavailable) {
