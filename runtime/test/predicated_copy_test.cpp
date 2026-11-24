@@ -1,6 +1,10 @@
 // Preparation-only checks: no Vulkan calls, loader, shaders, GPU or game data.
 #include "../src/vulkan_replay.h"
 #include <cstdio>
+#include <type_traits>
+static_assert(!std::is_copy_constructible_v<leonida::PredicatedBufferCopier::Batch>);
+static_assert(!std::is_copy_assignable_v<leonida::PredicatedBufferCopier::Batch>);
+static_assert(!std::is_move_constructible_v<leonida::PredicatedBufferCopier::Batch>);
 #define EXPECT(x) do { if(!(x)){std::fprintf(stderr,"line %d: %s\n",__LINE__,#x);return 1;} }while(0)
 // Non-null capability markers; prepare() never calls these entry points. Nothing is emitted by this test.
 template<class T>T available(){return reinterpret_cast<T>(+[](){});}

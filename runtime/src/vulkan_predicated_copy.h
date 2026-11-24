@@ -30,6 +30,8 @@ public:
         PredicatedBufferCopier& owner;
         std::vector<VkDescriptorPool> pools;
         explicit Batch(PredicatedBufferCopier& value):owner(value){}
+        Batch(const Batch&) = delete;
+        Batch& operator=(const Batch&) = delete;
         ~Batch(){for(auto pool:pools)owner.fn<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")(owner.device_,pool,nullptr);}
         bool prepare(VkBuffer source,VkBuffer destination,VkDeviceSize src,VkDeviceSize dst,VkDeviceSize bytes,
                      std::vector<PredicatedCopyDispatch>& out) {
@@ -59,12 +61,17 @@ public:
             const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,count*2};
             VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
             pool_info.maxSets=count;pool_info.poolSizeCount=1;pool_info.pPoolSizes=&size;
-            VkDescriptorPool pool=VK_NULL_HANDLE;
-            if(owner.fn<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(owner.device_,&pool_info,nullptr,&pool)!=VK_SUCCESS)return false;
-            // The batch is retained with the command buffer until its timeline ticket completes.
-            pools.push_back(pool);
+            // Prepare all host-side storage before acquiring the descriptor pool.
+            // The batch owns each handle exactly once until its timeline ticket completes.
             const std::vector<VkDescriptorSetLayout> layouts(count,owner.set_layout_);
             std::vector<VkDescriptorSet> sets(count);
+            out.reserve(count);
+            pools.emplace_back(VK_NULL_HANDLE);
+            auto& pool = pools.back();
+            if(owner.fn<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(owner.device_,&pool_info,nullptr,&pool)!=VK_SUCCESS){
+                pools.pop_back();
+                return false;
+            }
             VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             allocate.descriptorPool=pool;allocate.descriptorSetCount=count;allocate.pSetLayouts=layouts.data();
             if(owner.fn<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(owner.device_,&allocate,sets.data())!=VK_SUCCESS)return false;
