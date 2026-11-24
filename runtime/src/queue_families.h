@@ -30,6 +30,7 @@ inline QueueFamilies pick_queue_families(std::span<const VkQueueFamilyProperties
                f.minImageTransferGranularity.depth == 1;
     };
     bool have_compute = false, have_copy = false;
+    std::uint32_t fine_compute = graphics;
     for (std::uint32_t i = 0; i < families.size(); ++i) {
         const auto& f = families[i];
         if (!f.queueCount) continue;
@@ -37,13 +38,16 @@ inline QueueFamilies pick_queue_families(std::span<const VkQueueFamilyProperties
             out.compute = i;
             have_compute = true;
         }
+        if (fine_compute == graphics && (f.queueFlags & c) && !(f.queueFlags & g) && fine_grained(f))
+            fine_compute = i;
         if (!have_copy && (f.queueFlags & t) && !(f.queueFlags & (g | c)) && fine_grained(f)) {
             out.copy = i;
             have_copy = true;
         }
     }
-    // No DMA family: copies go to the async-compute family, which can transfer too (compute implies transfer).
-    if (!have_copy && have_compute && fine_grained(families[out.compute])) out.copy = out.compute;
+    // No fine-grained DMA family: any fine-grained async-compute family can transfer.
+    // The preferred compute family itself may only support coarse image copies.
+    if (!have_copy) out.copy = fine_compute;
     return out;
 }
 
@@ -84,7 +88,7 @@ inline QueueSlot pick_queue_slot(std::initializer_list<std::span<const std::uint
     std::size_t p = 0;
     for (const auto users : pools) {
         for (std::size_t i = 0; i < users.size(); ++i)
-            if (users[i] < fewest) {
+            if (chosen.pool == SIZE_MAX || users[i] < fewest) {
                 fewest = users[i];
                 chosen = {p, i};
             }

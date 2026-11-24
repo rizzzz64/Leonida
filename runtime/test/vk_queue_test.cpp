@@ -103,6 +103,21 @@ int check_picker() {
         const auto q = pick_queue_families(f, 0);
         EXPECT(q.copy == 2);
     }
+    {
+        const std::array f{fam(G), fam(C, 8), fam(C), fam(T, 4)};
+        const auto q = pick_queue_families(f, 0);
+        EXPECT(q.compute == 1 && q.copy == 2);
+    }
+    {
+        const std::array f{fam(G), fam(C, 8), fam(C), fam(T)};
+        const auto q = pick_queue_families(f, 0);
+        EXPECT(q.compute == 1 && q.copy == 3);
+    }
+    {
+        const std::array<std::uint32_t, 2> users{UINT32_MAX, UINT32_MAX};
+        const auto slot = pick_queue_slot({users});
+        EXPECT(slot.pool == 0 && slot.index == 0);
+    }
     // D3D12 tile mapping is legal on all queue kinds. Dedicated async queues that cannot
     // bind sparse pages must use the graphics family when sparse buffers are offered.
     {
