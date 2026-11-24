@@ -607,7 +607,8 @@ int main() {
     CHECK(!JsonReader("\"\\uzzzz\"").parse(json));
     CHECK(!JsonReader("\"\\u0x41\"").parse(json));
     CHECK(!JsonReader("\"\\u00").parse(json));
-    CHECK(JsonReader("\"\\u0041\"").parse(json) && json.string == "A");
+    Json escaped;
+    CHECK(JsonReader("\"\\u0041\"").parse(escaped) && escaped.string == "A");
 
     const auto shader = container({{dynamic, 600}});
     CHECK(dxbc_part(shader, "PRIV").size() == 4 && !dxbc_part(shader, "DXIL").empty() && dxbc_part(shader, "RTS0").empty());
