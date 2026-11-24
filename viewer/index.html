@@ -360,27 +360,53 @@ async function loadChunk(entry) {
     inflight--;
   }
 }
+// The manifest is fixed for this viewer session. Build the cell index lazily: ordinary
+// non-LOD worlds never need it, and a full download queue still need not rank unloaded chunks.
+let lodChains = null;
+function hasTargetTier(def, p) {
+  if (!lodChains) {
+    lodChains = new Map();
+    for (const tier of world.chunks) {
+      if (tier.lod === undefined || tier.lod === "orphan_hd") continue;
+      const key = tier.cell.join(",");
+      if (!lodChains.has(key)) lodChains.set(key, []);
+      lodChains.get(key).push(tier);
+    }
+  }
+  const chain = lodChains.get(def.cell.join(",")) || [];
+  return chain.some(tier => tier !== def && range(tier, p).load);
+}
 function stream(now = performance.now()) {
   const p = camera.position;
-  const visibleTiers = new Map();
+  const ranges = new Map(), visibleTiers = new Map();
+  // Choose a single resident winner before evicting anything. Prefer an in-band tier,
+  // then one inside slack, then a resident outside slack if a replacement is needed.
+  // Keeping at most one extra tier per cell prevents repeated handoffs accumulating.
   for (const [id, c] of live) {
     if (!c.obj && !c.loading) continue;
-    const { load, keep } = range(c.def, p);
-    if (keep) {
-      // Orphan HD has its own band and no replacement in the LOD chain.
-      if (c.obj && c.def.lod === "orphan_hd") {
-        c.obj.visible = load;
-      } else if (c.obj && c.def.lod !== undefined) {
-        const cell = c.def.cell.join(",");
-        const current = visibleTiers.get(cell);
-        c.obj.visible = !current || (load && !current.inBand);
-        if (c.obj.visible) {
-          if (current) current.obj.visible = false;
-          visibleTiers.set(cell, { obj: c.obj, inBand: load });
-        }
-      }
-      continue;
+    const r = range(c.def, p);
+    ranges.set(id, r);
+    if (!c.obj || c.def.lod === undefined || c.def.lod === "orphan_hd") continue;
+    const rank = r.load ? 2 : r.keep ? 1 : hasTargetTier(c.def, p) ? 0 : -1;
+    if (rank < 0) continue;
+    const cell = c.def.cell.join(",");
+    const current = visibleTiers.get(cell);
+    if (!current || rank > current.rank) visibleTiers.set(cell, { id, rank });
+  }
+  for (const [id, c] of live) {
+    const r = ranges.get(id);
+    if (!r) continue;
+    let keep = r.keep;
+    if (c.obj && c.def.lod === "orphan_hd") {
+      c.obj.visible = r.load;
+    } else if (c.obj && c.def.lod !== undefined) {
+      const winner = visibleTiers.get(c.def.cell.join(","));
+      c.obj.visible = winner?.id === id;
+      // Retain a fallback across slow downloads, parsing, and failed retries.
+      // Once another tier wins, the out-of-slack tier is immediately evicted.
+      keep ||= c.obj.visible;
     }
+    if (keep) continue;
     drop(id);
     // A canceled retry does not erase the previous failures or spend another attempt.
     if (c.previous) live.set(id, c.previous);
