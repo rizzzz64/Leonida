@@ -8,6 +8,7 @@
 #include <memory>
 #include <initializer_list>
 #include "predicate_reduce_spv.h"
+#include "vulkan_memory.h"
 
 namespace leonida {
 struct PredicateCapture {
@@ -67,17 +68,23 @@ public:
         if (fn<PFN_vkCreateBuffer>("vkCreateBuffer")(device_, &buffer, nullptr, &b->buffer) != VK_SUCCESS) return {};
         VkMemoryRequirements requirements{};
         fn<PFN_vkGetBufferMemoryRequirements>("vkGetBufferMemoryRequirements")(device_, b->buffer, &requirements);
-        std::uint32_t type = UINT32_MAX;
-        for (std::uint32_t i = 0; i < memory_.memoryTypeCount; ++i) {
-            if (!(requirements.memoryTypeBits & (1u << i))) continue;
-            if (type == UINT32_MAX) type = i;
-            if (memory_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) { type = i; break; }
-        }
-        if (type == UINT32_MAX) return {};
+        // Use the same heap-size checks and fallback order as indirect dispatch scratch.
+        const auto types = memory_type_order(memory_, requirements.memoryTypeBits, 0,
+                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, requirements.size);
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = type;
-        if (fn<PFN_vkAllocateMemory>("vkAllocateMemory")(device_, &allocation, nullptr, &b->memory) != VK_SUCCESS ||
+        const auto allocate = fn<PFN_vkAllocateMemory>("vkAllocateMemory");
+        for (const auto type : types) {
+            allocation.memoryTypeIndex = type;
+            VkDeviceMemory candidate = VK_NULL_HANDLE;
+            const VkResult result = allocate(device_, &allocation, nullptr, &candidate);
+            if (result == VK_SUCCESS) {
+                b->memory = candidate;
+                break;
+            }
+            if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) return {};
+        }
+        if (!b->memory ||
             fn<PFN_vkBindBufferMemory>("vkBindBufferMemory")(device_, b->buffer, b->memory, 0) != VK_SUCCESS) return {};
         const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
         VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};

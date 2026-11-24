@@ -41,6 +41,11 @@ int main() {
     auto no_memory = memory; no_memory.memoryTypeCount = 0;
     PredicateReducer allocation_failure(d.device_proc, d.device, no_memory, 16);
     EXPECT(!allocation_failure.batch(1));
+    // A compatible memory type is still unsuitable when its heap cannot hold the allocation.
+    auto tiny_heaps = memory;
+    for (std::uint32_t i = 0; i < tiny_heaps.memoryHeapCount; ++i) tiny_heaps.memoryHeaps[i].size = 0;
+    PredicateReducer undersized(d.device_proc, d.device, tiny_heaps, 16);
+    EXPECT(!undersized.batch(1));
     VulkanContext context(d.device_proc, d.device, true, true);
     context.configure_predication(d.device_proc, memory, properties.limits.maxStorageBufferRange, d.family);
     VulkanQueue queue(context, d.queue, d.family);
