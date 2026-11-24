@@ -462,6 +462,15 @@ int main() {
         RootSignature many;
         many.params.assign(65, table());
         check(!pack_stage(many, Stage::Compute).ok, "pack_stage: more than 64 parameters rejected");
+        RootSignature invalid;
+        invalid.params = {consts(1), table(), view()};
+        invalid.params[1].type = static_cast<ParamType>(0xffffffffu);
+        for (Stage stage : {Stage::Compute, Stage::Mesh, Stage::Pixel, Stage::Vertex, Stage::Geometry}) {
+            const auto result = pack_stage(invalid, stage);
+            check(!result.ok && result.first_sgpr.empty() && result.error.find("index 1") != std::string::npos,
+                  "pack_stage: unknown enum cannot silently alias the next root argument");
+        }
+        check(!pack(invalid).ok, "pack: unknown enum remains rejected");
     }
 
     if (g_failures != 0) std::printf("%d FAILURES\n", g_failures);

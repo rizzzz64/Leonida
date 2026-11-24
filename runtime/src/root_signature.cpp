@@ -63,6 +63,10 @@ StagePackResult pack_stage(const RootSignature& sig, Stage stage) {
     first.reserve(sig.params.size());
     for (size_t i = 0; i < sig.params.size(); ++i) {
         const RootParameter& p = sig.params[i];
+        if (p.type != ParamType::Constants && p.type != ParamType::Descriptor && p.type != ParamType::Table) {
+            out.error = "unknown root parameter type at index " + std::to_string(i);
+            return out;
+        }
         if (p.type == ParamType::Constants && p.num_values == 0) {
             out.error = "root constant parameter needs at least 1 dword";
             return out;
