@@ -123,10 +123,14 @@ inline bool resource_tiling(const TilingDesc& desc, ResourceTiling& out) {
         out.subresources = {{out.total_tiles, 1, 1, 0}};
         return true;
     }
+    if (desc.kind != TiledKind::texture2d && desc.kind != TiledKind::texture3d) return false;
     const bool volume = desc.kind == TiledKind::texture3d;
     if (desc.samples != 1 && (desc.samples != 4 || volume || desc.mips != 1 || desc.block != 1)) return false;
     const TileShape elements = element_tile_shape(volume, desc.element_bytes, desc.samples);
-    if (!elements.width || !desc.mips || !desc.block || !desc.width || !desc.height || !desc.depth_or_layers)
+    // A uint64 width has at most 64 distinct mip levels; the helper deliberately
+    // accepts repeated 1x1 levels up to that bound for synthetic arithmetic tests.
+    if (!elements.width || !desc.mips || desc.mips > 64 ||
+        (desc.block != 1 && desc.block != 4) || !desc.width || !desc.height || !desc.depth_or_layers)
         return false;
     const std::uint64_t shape_w = std::uint64_t(elements.width) * desc.block;
     const std::uint64_t shape_h = std::uint64_t(elements.height) * desc.block;
@@ -135,6 +139,10 @@ inline bool resource_tiling(const TilingDesc& desc, ResourceTiling& out) {
     result.shape = {std::uint32_t(shape_w), std::uint32_t(shape_h), elements.depth};
     const std::uint32_t layers = volume ? 1 : desc.depth_or_layers;
     const std::uint32_t depth = volume ? desc.depth_or_layers : 1;
+    // D3D12 names subresources with a uint32 index. Reject an unrepresentable count
+    // before allocating or multiplying the vector's size on a narrower host.
+    const std::uint64_t subresource_count = std::uint64_t(desc.mips) * layers;
+    if (subresource_count > UINT32_MAX || subresource_count > result.subresources.max_size()) return false;
 
     // One array slice: standard mips while wider than half a tile or taller than a tile, then the packed tail.
     std::vector<SubresourceTiling> slice(desc.mips);
@@ -178,7 +186,7 @@ inline bool resource_tiling(const TilingDesc& desc, ResourceTiling& out) {
     result.packed_tiles = std::uint32_t(packed_tiles);
     result.packed_start = result.packed_mips ? std::uint32_t(standard_tiles) : 0;
     result.total_tiles = std::uint32_t(per_slice * layers);
-    result.subresources.reserve(std::size_t(desc.mips) * layers);
+    result.subresources.reserve(static_cast<std::size_t>(subresource_count));
     for (std::uint32_t layer = 0; layer < layers; ++layer)
         for (SubresourceTiling s : slice) {
             if (s.start != packed_tile) s.start += std::uint32_t(per_slice * layer);

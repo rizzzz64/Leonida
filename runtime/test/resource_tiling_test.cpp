@@ -229,6 +229,12 @@ int main() {
     CHECK(!resource_tiling({TiledKind::texture2d, 64, 64, 1, 0, 4, 1}, t));
     CHECK(!resource_tiling({TiledKind::texture2d, 0, 64, 1, 1, 4, 1}, t));
 
+    // Metadata that cannot describe a supported tiled resource must fail before allocation.
+    CHECK(!resource_tiling({static_cast<TiledKind>(99), 64, 64, 1, 1, 4, 1}, t));
+    CHECK(!resource_tiling({TiledKind::texture2d, 64, 64, 1, 1, 4, 3}, t));
+    CHECK(!resource_tiling({TiledKind::texture2d, 64, 64, 1, 65, 4, 1}, t));
+    CHECK(!resource_tiling({TiledKind::texture2d, 1, 1, UINT32_MAX, 2, 4, 1}, t));
+    CHECK(t.subresources.empty() && t.total_tiles == 0);
     // Overflows and shift edge cases must fail cleanly instead of wrapping or crashing.
     // 2^25 * 2^25 * 2^14 = 2^64 wraps per_slice * layers to 0 in unchecked uint64_t arithmetic.
     CHECK(!resource_tiling({TiledKind::texture2d, 1ULL << 31, 1u << 31, 16384, 1, 16, 1}, t));
