@@ -208,9 +208,14 @@ public:
         if (event != frame_event_origin || !token) return pacer_hr::invalid_arg;
         std::unique_lock lock(mutex_);
         ++waiters_;
-        const std::int32_t result = wait_locked(lock, timeout_ms, token);
-        if (--waiters_ == 0) cv_.notify_all();
-        return result;
+        // The guard is destroyed before lock, including when the clock or record allocation throws.
+        // Otherwise shutdown can wait forever for a waiter that has already left.
+        struct WaiterGuard {
+            std::uint32_t& waiters;
+            std::condition_variable& cv;
+            ~WaiterGuard() { if (--waiters == 0) cv.notify_all(); }
+        } waiter{waiters_, cv_};
+        return wait_locked(lock, timeout_ms, token);
     }
 
     // GetFrameStatisticsX(token, type_mask, &count, array). `count` is the room in `out` on entry and the number of
@@ -370,7 +375,12 @@ public:
 
     // The fps cap off (LEONIDA_PRESENT_UNCAP; see the top comment): waits never block and presents count as shown
     // at once. Registration and suspension keep meaning what they did; the flag survives suspend/resume.
-    void set_uncapped(bool on) { std::lock_guard guard(mutex_); uncapped_ = on; }
+    void set_uncapped(bool on) {
+        std::lock_guard guard(mutex_);
+        if (uncapped_ == on) return;
+        uncapped_ = on;
+        cv_.notify_all();  // blocked waits must re-evaluate pacing even if the clock has not advanced
+    }
     bool uncapped() const { std::lock_guard guard(mutex_); return uncapped_; }
 
 private:

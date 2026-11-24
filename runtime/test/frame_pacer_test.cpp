@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <future>
 #include <limits>
+#include <stdexcept>
 #include <thread>
 
 using namespace leonida;
@@ -566,6 +567,57 @@ int main() {
         EXPECT(blocked(wait));
         clock.advance_us(period);
         EXPECT(wait.get().token == 6);
+    }
+
+    // A clock that throws from wait() must not leave a phantom waiter behind on destruction.
+    {
+        class ThrowClock final : public FrameClock {
+        public:
+            std::uint64_t now_us() override { return 0; }
+            void wait(std::unique_lock<std::mutex>&, std::condition_variable&, std::uint64_t) override {
+                throw std::runtime_error("synthetic wait failure");
+            }
+        } clock;
+        FramePacer pacer(clock);
+        EXPECT(setup(pacer, 1));
+        std::uint64_t token = 99;
+        bool caught = false;
+        try {
+            pacer.wait_frame_event(frame_event_origin, infinite_timeout_ms, 0, &token);
+        } catch (const std::runtime_error&) { caught = true; }
+        EXPECT(caught && token == 99);
+        // With the previous waiter counter the destructor below never returns.
+    }
+
+    // Changing the pacing mode wakes an already blocked wait, without moving the fake clock.
+    {
+        class SignallingClock final : public FrameClock {
+        public:
+            std::promise<void> entered;
+            bool announced = false;
+            std::uint64_t now_us() override { return 0; }
+            void wait(std::unique_lock<std::mutex>& lock, std::condition_variable& cv, std::uint64_t) override {
+                if (!announced) { announced = true; entered.set_value(); }
+                cv.wait(lock);
+            }
+        } clock;
+        FramePacer pacer(clock);
+        EXPECT(setup(pacer, 1));
+        auto entered = clock.entered.get_future();
+        auto waiter = wait_async(pacer, infinite_timeout_ms);
+        if (entered.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            pacer.suspend();
+            waiter.get();
+            EXPECT(!"waiter entered the clock");
+        }
+        pacer.set_uncapped(true);
+        if (waiter.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            pacer.suspend();
+            waiter.get();
+            EXPECT(!"mode change woke the blocked waiter");
+        }
+        const Result r = waiter.get();
+        EXPECT(r.hr == pacer_hr::ok && r.token == 1);
     }
 
     // Real clock: five 10 ms vblanks take about 50 ms.

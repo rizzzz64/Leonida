@@ -3237,6 +3237,7 @@ if(TARGET Vulkan::Headers)
       target_compile_options(frame_pacer_test PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME frame_pacer COMMAND frame_pacer_test)
+    set_tests_properties(frame_pacer PROPERTIES TIMEOUT 60)
 
     # Replay refuses a list whose whole-view or implicit zero-clear needs an unset vkCmdClear*Image (no GPU).
     add_executable(replay_clear_gate_test test/replay_clear_gate_test.cpp)
