@@ -553,6 +553,14 @@ class CommandLineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "report would overwrite an input file"):
             link.ensure_report_is_separate(self.report, [self.report])
 
+    def test_report_guard_uses_shared_volume_identity_rules(self):
+        with patch.object(link, "same_report_path", return_value=True) as aliases:
+            with self.assertRaisesRegex(ValueError, "report would overwrite an input file"):
+                link.ensure_report_is_separate(self.report, [self.directory / "REPORT.json"])
+            aliases.assert_called_once_with(self.report, self.directory / "REPORT.json")
+        with patch.object(link, "same_report_path", return_value=False):
+            link.ensure_report_is_separate(self.report, [self.vs])
+
     def test_inspect_keeps_types_and_components(self):
         shader = self.module("with_component", input(location=3, component=2, components=2))
         result = self.command("inspect", shader)
