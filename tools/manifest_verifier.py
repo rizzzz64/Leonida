@@ -25,6 +25,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 import time
 from typing import Callable, Optional, TextIO
 
@@ -136,7 +137,7 @@ def load_cache(path: str) -> dict[str, dict]:
             doc = json.load(f)
         if doc["version"] == CACHE_VERSION:
             return {k: e for k, e in doc["files"].items() if isinstance(e, dict) and "stamp" in e and "sha256" in e}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
         pass
     return {}
 
@@ -146,17 +147,23 @@ def save_cache(path: str, entries: dict[str, dict]) -> None:
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = None
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        # Each writer owns a distinct staging file. Never truncate or unlink a
+        # concurrent writer's staging file or an unrelated fixed ".tmp" path.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n",
+                                         dir=directory, prefix=".manifest-cache-", suffix=".tmp",
+                                         delete=False) as f:
+            tmp = f.name
             json.dump({"version": CACHE_VERSION, "files": dict(sorted(entries.items()))}, f, indent=1)
         os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def walk(target_dir: str, *, exclude: str | tuple[str, ...] | None = None):
@@ -215,7 +222,7 @@ def load_manifest(path: str) -> dict[str, dict]:
     try:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f, object_pairs_hook=unique_object)
-    except ValueError as err:
+    except (ValueError, RecursionError) as err:
         raise ManifestError(f"{path} is not valid JSON ({err})") from None
     except OSError as err:
         raise ManifestError(f"cannot read manifest {path}: {err}") from None

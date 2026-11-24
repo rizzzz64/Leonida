@@ -954,6 +954,36 @@ class TestVerifyCache(unittest.TestCase):
                 report = self.verify()
                 self.assertEqual((report.passed, report.cached), (True, 0))
 
+    def test_nested_cache_and_manifest_are_handled(self) -> None:
+        deep = "[" * (sys.getrecursionlimit() + 100) + "0" + "]" * (sys.getrecursionlimit() + 100)
+        with open(self.cache, "w", encoding="utf-8", newline="\n") as f:
+            f.write(deep)
+        self.assertEqual(mv.load_cache(self.cache), {})
+        with open(self.manifest, "w", encoding="utf-8", newline="\n") as f:
+            f.write(deep)
+        with self.assertRaises(mv.ManifestError):
+            mv.load_manifest(self.manifest)
+
+    def test_overlapping_cache_publications_use_distinct_staging_files(self) -> None:
+        sentinel = self.cache + ".tmp"
+        with open(sentinel, "w", encoding="utf-8", newline="\n") as f:
+            f.write("unrelated")
+        replace = os.replace
+        staging = []
+        def overlapping(src, dst):
+            staging.append(src)
+            if len(staging) == 1:
+                mv.save_cache(self.cache, {"inner": {}})
+            replace(src, dst)
+        with patch.object(mv.os, "replace", side_effect=overlapping):
+            mv.save_cache(self.cache, {"outer": {}})
+        self.assertEqual(len(set(staging)), 2)
+        with open(self.cache, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["files"], {"outer": {}})
+        with open(sentinel, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "unrelated")
+        self.assertTrue(all(not os.path.exists(p) for p in staging))
+
     def test_cache_inside_target_and_strict(self) -> None:
         self.cache = os.path.join(self.game, "cache.json")
         for _ in range(2):  # cold and warm
