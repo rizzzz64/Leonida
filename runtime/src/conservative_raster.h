@@ -38,9 +38,16 @@ inline InnerCoverageRequirements inner_coverage_requirements(std::span<const std
     if (words.size() < 5 || words[0] != 0x07230203) return result;
     for (std::size_t i = 5; i < words.size();) {
         const auto count = words[i] >> 16, op = words[i] & 0xffff;
-        if (!count || count > words.size() - i) return result;
-        if (op == 17 && count >= 2 && words[i + 1] == 5265) result.fully_covered = true;
-        if (op == 16 && count >= 3 && words[i + 2] == 4446) result.post_depth = true;
+        if (!count || count > words.size() - i) return {};
+        // The two declarations inspected here must have their mandatory operands.
+        // OpCapability has exactly one operand; OpExecutionMode has at least two.
+        if ((op == 17 && count != 2) || (op == 16 && count < 3)) return {};
+        if (op == 17 && words[i + 1] == 5265) result.fully_covered = true;
+        if (op == 16 && words[i + 2] == 4446) {
+            // PostDepthCoverage has no additional execution-mode literals.
+            if (count != 3) return {};
+            result.post_depth = true;
+        }
         i += count;
     }
     result.valid = true;

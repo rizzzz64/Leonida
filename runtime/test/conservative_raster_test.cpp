@@ -40,6 +40,15 @@ int main() {
     check(!inner_coverage_requirements(std::span(module).first(9)).valid);
     const std::uint32_t zero_count[] = {0x07230203, 0x00010500, 0, 2, 0, 0};
     check(!inner_coverage_requirements(zero_count).valid);
+    const std::uint32_t short_cap[] = {0x07230203, 0x00010500, 0, 2, 0, (1u << 16) | 17};
+    const std::uint32_t short_mode[] = {0x07230203, 0x00010500, 0, 2, 0, (2u << 16) | 16, 1};
+    const std::uint32_t extra_mode[] = {0x07230203, 0x00010500, 0, 2, 0, (4u << 16) | 16, 1, 4446, 0};
+    const std::uint32_t partial[] = {0x07230203, 0x00010500, 0, 2, 0, (2u << 16) | 17, 5265, 0};
+    check(!inner_coverage_requirements(short_cap).valid);
+    check(!inner_coverage_requirements(short_mode).valid);
+    check(!inner_coverage_requirements(extra_mode).valid);
+    const auto invalid = inner_coverage_requirements(partial);
+    check(!invalid.valid && !invalid.fully_covered && !invalid.post_depth);
     const std::uint32_t ordinary[] = {0x07230203, 0x00010500, 0, 2, 0, (2u << 16) | 17, 1};
     const auto regular = inner_coverage_requirements(ordinary);
     check(regular.valid && !regular.fully_covered && !regular.post_depth);
