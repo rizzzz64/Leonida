@@ -1478,6 +1478,32 @@ class WorldBuildTest(unittest.TestCase):
         self.assertEqual(world_build._compute_spawn(small), [60.0, 30.0, 180.0])
         self.assertEqual(world_build._compute_spawn([]), [0.0, 20.0, 40.0])
 
+    def test_lod_spawn_is_in_a_loadable_cell(self):
+        def chunk(lod, x=0):
+            return {"lod": lod, "bounds": [x + 100, 0, 100, x + 156, 1000, 156],
+                    "cell": [x, 0, x + 256, 256]}
+
+        hd, lod, orphan = chunk("hd"), chunk("lod", 10000), chunk("orphan_hd", 20000)
+        cases = [
+            ([hd], {"hd": [0, 130]}, hd),
+            ([orphan], {"orphan_hd": [0, 50]}, orphan),
+            ([hd, lod], {"hd": [0, 0], "lod": [0, 450]}, lod),
+            ([hd, orphan], {"hd": [0, 130], "orphan_hd": [0, 800]}, hd),
+            ([lod], {"lod": [0, 450]}, lod),
+        ]
+        for chunks, bands, selected in cases:
+            with self.subTest(bands=bands):
+                x, y, z = world_build._compute_spawn(chunks, bands)
+                x0, z0, x1, z1 = selected["cell"]
+                distance = math.hypot(max(x0 - x, 0, x - x1), max(z0 - z, 0, z - z1))
+                lo, hi = bands[selected["lod"]]
+                self.assertGreaterEqual(distance, lo)
+                self.assertLess(distance, hi)
+                self.assertGreater(y, selected["bounds"][4])
+        self.assertEqual(world_build._compute_spawn([], {}), [0.0, 20.0, 40.0])
+        self.assertEqual(world_build._compute_spawn(
+            [{"bounds": [10.0, 0.0, 20.0, 110.0, 5.0, 120.0]}]), [60.0, 30.0, 180.0])
+
     def test_unusable_input_preserves_output_and_reports_failure(self):
         cases = ("unrelated_directory", "corrupt_manifest", "invalid_schema", "empty_manifest",
                  "missing_objs", "empty_geometry", "invalid_file_fields")

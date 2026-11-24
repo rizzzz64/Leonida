@@ -911,8 +911,41 @@ test('LOD sets show one tier per cell by horizontal distance, with slack before 
     assert.ok(f.state.live.has('lod'));
     Object.assign(pos, { x: 256 + 600, y: 0, z: 100 });      // 600 m: SLOD1 only
     f.frame();
-    assert.ok(!f.state.live.has('lod'));
+    assert.ok(f.state.live.has('lod'), 'keep a visible fallback beyond slack until SLOD1 is ready');
+    assert.equal(lod.visible, true);
     assert.equal(f.requests.at(-1).url, 'slod1.glb');
+    const slod = Object.assign(f.object(), { visible: true });
+    await f.succeed(2, slod);
+    f.frame();
+    assert.ok(!f.state.live.has('lod'));
+    assert.equal(slod.visible, true);
+});
+
+test('LOD fallback survives a fast crossing and exhausted retries, but not leaving the cell range', async () => {
+    const f = fixture(0);
+    const cell = [0, 0, 256, 256];
+    f.context.world = { test: false, lod_bands: { hd: [0, 130], lod: [130, 450], slod1: [450, 1000] },
+        chunks: ['hd', 'lod', 'slod1'].map(lod => ({ ...worldChunk, id: lod, url: lod + '.glb', lod, cell })) };
+    const hd = Object.assign(f.object(), { visible: true });
+    f.frame(0);
+    await f.succeed(0, hd);
+    f.context.camera.position.x = 256 + 600;
+    f.frame(0);
+    assert.deepEqual(f.requests.map(r => r.url), ['hd.glb', 'slod1.glb']);
+    assert.equal(hd.visible, true);
+    assert.ok(f.state.live.has('hd'));
+    for (const [i, now] of [[1, 0], [2, 1000], [3, 3000]]) {
+        await f.fail(i, now);
+        f.frame(now + (i === 1 ? 1000 : i === 2 ? 2000 : 4000));
+        assert.ok(f.state.live.has('hd'));
+        assert.equal(hd.visible, true);
+    }
+    assert.equal(f.requests.length, 4);
+    assert.equal(f.state.live.get('slod1').attempts, 3);
+    f.context.camera.position.x = 256 + 1100;
+    f.frame();
+    assert.ok(!f.state.live.has('hd'), 'a cell outside every tier band must unload');
+    assert.equal(f.disposed.length, 1);
 });
 
 
