@@ -360,6 +360,15 @@ async function loadChunk(entry) {
     inflight--;
   }
 }
+// Keep the nearest k candidates in stable manifest order; k is at most the download concurrency.
+function retainNearest(want, def, distance, limit) {
+  if (limit <= 0) return;
+  if (want.length === limit && distance >= want[want.length - 1].distance) return;
+  let i = want.length;
+  while (i > 0 && distance < want[i - 1].distance) --i;
+  want.splice(i, 0, { def, distance });
+  if (want.length > limit) want.pop();
+}
 function stream(now = performance.now()) {
   const p = camera.position;
   const visibleTiers = new Map();
@@ -393,9 +402,11 @@ function stream(now = performance.now()) {
     const entry = live.get(def.id);
     if (entry && (entry.obj || entry.loading || entry.attempts >= MAX_LOAD_ATTEMPTS || now < entry.retryAt)) continue;
     const { d: distance, load } = range(def, p);
-    if (load) want.push({ def, distance });
+    if (!load) continue;
+    if (world.test) want.push({ def, distance });
+    else retainNearest(want, def, distance, MAX_INFLIGHT - inflight);
   }
-  want.sort((a, b) => a.distance - b.distance);
+  if (world.test) want.sort((a, b) => a.distance - b.distance);
   for (const { def } of want) {
     if (inflight >= MAX_INFLIGHT) break;
     const previous = live.get(def.id);
