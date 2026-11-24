@@ -65,3 +65,11 @@ test('shadow anchor is quantized in world space', () => {
     assert.equal(anchor({x:7,y:18,z:-20}).join(','),'0,16,-16');
     assert.equal(anchor({x:9,y:18,z:-20}).join(','),'16,16,-16');
 });
+
+test('jump cannot pass a ceiling reported by the collision probe', () => {
+    const {advanceWalker} = helper('// ---------- walk physics (pure) ----------','// ---------- end walk physics ----------','{advanceWalker}');
+    const p={x:0,y:1.7,z:0}, state={vy:0,grounded:true,jumpHeld:false};
+    const probe={ground:()=>0,blocked:()=>false,ceiling:()=>true};
+    advanceWalker(p,state,{x:0,z:0},4.2,0.1,probe,true);
+    assert.equal(p.y,1.7); assert.equal(state.vy,0);
+});

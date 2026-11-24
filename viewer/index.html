@@ -258,7 +258,11 @@ function stepWalker(p, state, dx, dz, dt, probe, jump = false) {
     state.vy = 4.8; state.grounded = false;
   }
   state.vy = Math.max(-55, state.vy - WALK_GRAVITY * dt);
-  const nextFoot = foot + state.vy * dt;
+  let nextFoot = foot + state.vy * dt;
+  if (state.vy > 0 && probe.ceiling?.(p.x, p.y, p.z, nextFoot - foot)) {
+    state.vy = 0;
+    nextFoot = foot;
+  }
   if (state.vy <= 0 && nextFoot <= floor) {
     p.y = floor + EYE_HEIGHT; state.vy = 0; state.grounded = true;
   } else {
@@ -266,9 +270,10 @@ function stepWalker(p, state, dx, dz, dt, probe, jump = false) {
   }
 }
 function advanceWalker(p, state, direction, speed, dt, probe, jumpHeld = false) {
+  let remaining = Math.min(Math.max(dt, 0), 0.1);
+  if (!(remaining > 1e-8)) return;
   let jump = jumpHeld && !state.jumpHeld;
   state.jumpHeld = jumpHeld;
-  let remaining = Math.min(Math.max(dt, 0), 0.1);
   while (remaining > 1e-8) {
     const step = Math.min(remaining, PHYSICS_STEP);
     stepWalker(p, state, direction.x * speed * step, direction.z * speed * step, step, probe, jump);
@@ -510,6 +515,7 @@ function stream(now = performance.now()) {
 
 // ---------- walk collision adapter ----------
 let walkRay, walkOrigin, walkDirection, walkNormal, walkNormalMatrix, walkInstanceMatrix, walkWorldMatrix;
+const walkHits = [];
 function makeWalkProbe(p) {
   // Only visible, loaded chunks near the walker participate. The raycast is a prototype
   // against render geometry, not the original game's collision or navigation mesh.
@@ -534,7 +540,8 @@ function makeWalkProbe(p) {
   function hits(x, y, z, dx, dy, dz, far) {
     walkRay.set(walkOrigin.set(x, y, z), walkDirection.set(dx, dy, dz));
     walkRay.far = far;
-    return walkRay.intersectObjects(roots, true);
+    walkHits.length = 0;
+    return walkRay.intersectObjects(roots, true, walkHits);
   }
   function upward(hit) {
     if (!hit.face) return false;
@@ -551,6 +558,9 @@ function makeWalkProbe(p) {
       for (const hit of hits(x, fromY, z, 0, -1, 0, 1000))
         if (visible(hit) && upward(hit)) return hit.point.y;
       return null;
+    },
+    ceiling(x, y, z, rise) {
+      return hits(x, y, z, 0, 1, 0, rise + 0.15).some(hit => visible(hit));
     },
     blocked(x, foot, z, dx, dz) {
       const length = Math.hypot(dx, dz);
@@ -573,29 +583,38 @@ if (world.test) {
   document.getElementById("banner").classList.remove("hidden");
 }
 const hud = document.getElementById("hud"), clock = new THREE.Clock();
-let fpsT = 0, fpsN = 0, fps = 0;
-const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+let fpsT = 0, fpsN = 0, fps = 0, hudElapsed = 0.25;
+const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), move = new THREE.Vector3();
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.1);
+  const elapsed = clock.getDelta();
+  const dt = Math.min(elapsed, 0.1);
   camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
   if (walkMode) {
     const input = walkingInput(keys, yaw);
     advanceWalker(camera.position, walkState, input.direction, input.speed, dt, makeWalkProbe(camera.position), input.jump);
   } else {
-  camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
-  const v = new THREE.Vector3(), s = speed * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 5 : 1) * (keys.has("ControlLeft") || keys.has("ControlRight") ? 0.2 : 1);
-  if (keys.has("KeyW")) v.add(fwd); if (keys.has("KeyS")) v.sub(fwd);
-  if (keys.has("KeyD")) v.add(right); if (keys.has("KeyA")) v.sub(right);
-  if (keys.has("KeyE")) v.y += 1; if (keys.has("KeyQ")) v.y -= 1;
-  if (v.lengthSq()) camera.position.addScaledVector(v.normalize(), s * dt);
+    camera.getWorldDirection(fwd); right.crossVectors(fwd, up).normalize();
+    const v = move.set(0, 0, 0), s = speed * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? 5 : 1) * (keys.has("ControlLeft") || keys.has("ControlRight") ? 0.2 : 1);
+    if (keys.has("KeyW")) v.add(fwd); if (keys.has("KeyS")) v.sub(fwd);
+    if (keys.has("KeyD")) v.add(right); if (keys.has("KeyA")) v.sub(right);
+    if (keys.has("KeyE")) v.y += 1; if (keys.has("KeyQ")) v.y -= 1;
+    if (v.lengthSq()) camera.position.addScaledVector(v.normalize(), s * dt);
   }
   stream();
   if (shadowsEnabled) followShadowLight(camera.position);
   renderer.render(scene, camera);
-  fpsN++; fpsT += dt; if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
-  const p = camera.position, loaded = [...live.values()].filter(c => c.obj).length;
+  fpsN++; fpsT += elapsed; if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
+  // Update telemetry four times per second rather than rewriting DOM and allocating a live-array every frame.
+  hudElapsed += elapsed;
+  if (hudElapsed < 0.25) return;
+  hudElapsed %= 0.25;
+  const p = camera.position;
+  let loaded = 0;
+  for (const c of live.values()) if (c.obj) ++loaded;
+  const mode = walkMode ? (walkState.waiting ? "walk: waiting for ground" : "walk") : "fly";
+  const shownSpeed = walkMode ? walkingInput(keys, yaw).speed : speed;
   hud.innerHTML = `<b>${world.test ? "test terrain" : "world"}</b><br>pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}<br>` +
-    `speed ${speed.toFixed(0)} m/s · ${fps.toFixed(0)} fps<br>chunks ${loaded}/${world.chunks.length} loaded, ${inflight} loading` +
+    `<b>${mode}</b> · speed ${shownSpeed.toFixed(1)} m/s · ${fps.toFixed(0)} fps<br>chunks ${loaded}/${world.chunks.length} loaded, ${inflight} loading` +
     (failed ? `, <span style="color:var(--warn)">${failed} load errors</span>` : "") +
     `<br>draw calls ${renderer.info.render.calls}, tris ${(renderer.info.render.triangles / 1000).toFixed(0)}k`;
 });
